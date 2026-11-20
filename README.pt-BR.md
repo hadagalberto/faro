@@ -2,7 +2,7 @@
 
 **Faro** é um banco de dados vetorial embutido e sem servidor para .NET — "SQLite para embeddings". Um pacote NuGet, um arquivo em disco, kernels de distância SIMD, índice exato e (em marcos futuros) índices aproximados, além de um caminho para pipelines RAG com Semantic Kernel / Microsoft.Extensions.AI. Licença MIT, alvos `net8.0` e `net10.0`, compatível com Native AOT e trimming.
 
-> **Status — Marco 1:** scaffold da solução, CI e base de busca exata concluídos: distâncias Cosine / Dot / L2 ao quadrado / Hamming com kernels SIMD e referência escalar, heaps min/max e conjuntos de visitados agrupados em pool, e `FlatIndex` com busca paralela determinística. HNSW, quantização, filtros, busca híbrida BM25, persistência com WAL e o conector VectorData estão planejados; veja [docs/architecture.md](docs/architecture.md).
+> **Status — Marco 2:** a base exata (distâncias SIMD + referência escalar, heaps/visitados em pool, `FlatIndex`) agora conta com `HnswIndex`: seleção de vizinhos Algoritmo 4, construção determinística, inserts concorrentes com locks finos, deletes com tombstone e reparo de vizinhos, além de `Compact()`. O recall é medido contra o Flat em 50 mil vetores x 128 dimensões. Quantização, filtros, BM25, WAL e o conector VectorData seguem planejados; veja [docs/architecture.md](docs/architecture.md).
 
 ## Por que Faro
 
@@ -13,7 +13,7 @@ A maioria das bibliotecas HNSW para .NET entrega apenas um índice. Faro visa o 
 | Índice exato Flat com SIMD e busca paralela | ✅ | — |
 | Kernels SIMD + referência escalar com testes de equivalência | ✅ | às vezes |
 | Heaps e conjuntos de visitados em pool (sem alocação por busca) | ✅ | — |
-| HNSW com construção determinística e reparo de vizinhos | planejado | ✅ |
+| HNSW com construção determinística, inserts concorrentes e reparo de vizinhos | ✅ | ✅ |
 | Quantização escalar/binária com rescore | planejado | — |
 | Filtros de payload com planejamento por seletividade | planejado | — |
 | BM25 + fusão RRF | planejado | — |

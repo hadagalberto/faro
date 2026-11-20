@@ -2,7 +2,7 @@
 
 **Faro** is an embedded, zero-server vector database for .NET — "SQLite for embeddings". One NuGet package, one file on disk, SIMD distance kernels, exact and approximate indexes, and a path into Semantic Kernel / Microsoft.Extensions.AI RAG pipelines. MIT licensed, targets `net8.0` and `net10.0`, and is built to be Native AOT and trimming compatible.
 
-> **Status — Milestone 1:** the solution scaffold, CI, and the exact-search foundation are complete: Cosine / Dot / squared-L2 / Hamming distances with SIMD + scalar reference kernels, pooled min/max heaps and visited sets, and the `FlatIndex` exact index with deterministic parallel search. HNSW, quantization, filtering, BM25 hybrid search, WAL persistence, and the VectorData connector are designed but not shipped yet; see [docs/architecture.md](docs/architecture.md) for the roadmap.
+> **Status — Milestone 2:** the exact-search foundation (SIMD + scalar distances, pooled heaps/visited sets, `FlatIndex`) is joined by `HnswIndex`: Algorithm 4 neighbour selection, deterministic builds, concurrent inserts with fine-grained locks, tombstone deletes with neighbour repair and `Compact()`. Recall is measured against Flat on 50k x 128-d clustered data. Quantization, filtering, BM25 hybrid search, WAL persistence and the VectorData connector are designed but not shipped yet; see [docs/architecture.md](docs/architecture.md).
 
 ## Why Faro
 
@@ -13,7 +13,7 @@ Most .NET HNSW packages hand you a bare index. Faro aims at the complete databas
 | Exact Flat index with SIMD kernels and parallel search | ✅ | — |
 | SIMD + scalar reference kernels with equivalence tests | ✅ | sometimes |
 | Pooled heaps / visited sets (no per-search allocations) | ✅ | — |
-| HNSW with deterministic builds and neighbour repair | planned | ✅ |
+| HNSW with deterministic builds, concurrent inserts and neighbour repair | ✅ | ✅ |
 | Scalar/binary quantization with rescoring | planned | — |
 | Payload filters with selectivity-aware planning | planned | — |
 | BM25 full-text + RRF hybrid search | planned | — |
@@ -49,6 +49,28 @@ int written = index.Search(queryEmbedding, k: 10, buffer);
 
 Results are ordered best-first — ascending score for Cosine / Euclidean / Hamming, descending for DotProduct — with exact ties broken by ascending id. The sequential search path allocates nothing except the returned array of the allocating overload.
 
+## Approximate search (HNSW)
+
+```csharp
+var index = new HnswIndex(new HnswOptions
+{
+    Dimensions = 768,
+    Distance = Distance.Cosine,
+    M = 16,               // layer-0 degree bound is 2 * M
+    EfConstruction = 200,
+    EfSearch = 64,
+    Seed = 12345,         // omit for randomized levels
+});
+
+int id = index.Add(embedding);
+SearchResult[] hits = index.Search(queryEmbedding, k: 10);          // uses EfSearch
+SearchResult[] wider = index.Search(queryEmbedding, k: 10, efSearch: 128);
+index.Delete(id);         // tombstone + neighbour repair
+index.Compact();          // rebuild without deleted nodes, ids unchanged
+```
+
+`ExtendCandidates` (default on) and `KeepPrunedConnections` control Algorithm 4; `Mc` relaxes its diversity test. Inserts may run in parallel with each other and with searches. The span `Search(query, k, buffer)` overload is allocation-free in steady state. Recall gates live in `tests/Faro.RecallTests`.
+
 ## Distances
 
 | Metric | API | Ordering | Notes |
@@ -74,7 +96,7 @@ dotnet build Faro.sln -c Release -warnaserror
 dotnet test Faro.sln -c Release
 ```
 
-The suite runs on both `net8.0` and `net10.0` with xUnit v3 on Microsoft.Testing.Platform: distance equivalence across all SIMD widths, pooled heap/visited-set invariants, Flat exactness against naive scalar brute force, deterministic parallel/sequential equivalence, concurrency stress, and zero-allocation assertions. Recall gates for Flat print a recall/latency table via `tests/Faro.RecallTests`.
+The suite runs on both `net8.0` and `net10.0` with xUnit v3 on Microsoft.Testing.Platform: distance equivalence across all SIMD widths, pooled heap/visited-set invariants, Flat exactness against naive scalar brute force, HNSW degree/reachability/tombstone invariants, deterministic builds, concurrent insert/search/delete stress, and zero-allocation assertions. Recall gates for Flat and HNSW print a recall/latency table via `tests/Faro.RecallTests`.
 
 ## Benchmarks
 

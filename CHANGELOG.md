@@ -6,12 +6,20 @@ All notable changes to Faro are documented here. The format follows [Keep a Chan
 
 ### Planned
 
-- HNSW index with deterministic builds, concurrent inserts, tombstones and compaction.
 - Scalar/binary quantization with oversampling and full-precision rescoring.
 - Composable payload filters with selectivity-aware execution.
 - BM25 full-text index and vector/keyword fusion (RRF, weighted scores).
 - Single-file `.faro` persistence with WAL and crash recovery.
 - `Microsoft.Extensions.VectorData` connector and integration tests.
+
+## [0.2.0] — Milestone 2
+
+### Added
+
+- `HnswIndex` / `HnswOptions`: layered navigable small-world graph with configurable `M` (`M0 = 2*M`), `EfConstruction`, `EfSearch`, level multiplier `1/ln(M)`, deterministic seed and Algorithm 4 neighbour selection with `ExtendCandidates`, `KeepPrunedConnections` and diversity factor `Mc`.
+- Fine-grained per-node locking for concurrent inserts concurrent with lock-free searches over copy-on-write adjacency snapshots; pooled heaps, visited stamps and candidate buffers keep the span search overload allocation-free.
+- Tombstone deletes with neighbour repair, plus `Compact()` that rebuilds the graph without deleted nodes while preserving ids and levels. A reciprocal spine keeps every layer reachable from the entry point even where heuristic pruning would otherwise strand a node.
+- Invariant, delete/compaction, degree/reachability, concurrency-stress, zero-allocation and deterministic-build tests; recall suite gate for HNSW at mean recall@10 >= 0.95 with efSearch=64 on 50k x 128-d clustered data against Flat ground truth.
 
 ## [0.1.0] — Milestone 1
 

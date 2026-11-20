@@ -4,9 +4,9 @@
 
 | Layer | Project | Status | Responsibility |
 | --- | --- | --- | --- |
-| Core | `src/Faro` | Milestone 1 | Metrics, storage, exact index, pooled search structures |
+| Core | `src/Faro` | Milestone 2 | Metrics, storage, exact + HNSW indexes, pooled search structures |
 | Connector | `src/Faro.VectorData` | planned | `Microsoft.Extensions.VectorData` record definitions, LINQ filter translation, hybrid search adapter |
-| Quality gates | `tests/Faro.Tests`, `tests/Faro.RecallTests` | Milestone 1 | Equivalence, invariants, concurrency, allocations, recall |
+| Quality gates | `tests/Faro.Tests`, `tests/Faro.RecallTests` | Milestone 2 | Equivalence, invariants, concurrency, allocations, recall |
 | Tooling | `benchmarks/Faro.Benchmarks`, `samples/Faro.Samples.Rag` | Milestone 1 | Throughput/latency measurement and an offline end-to-end sample |
 
 The core is intentionally dependency-free (only `System.Numerics.Tensors` is allowed by SPEC, and it is not needed yet). This keeps Native AOT and trimming predictable.
@@ -41,10 +41,17 @@ Storage is one flat array: `float[capacity * dimensions]` for real metrics, `ulo
 
 Both paths produce identical `(id, score)` sequences because every heap uses a total order.
 
+## HnswIndex
+
+`HnswIndex` assigns each node an exponentially distributed level from `1/ln(M)` (or a fixed seed), then links it on every layer from its level down to 0. Construction runs Algorithm 5's greedy descent above the node's level and a beam search (`EfConstruction`) at each lower layer; Algorithm 4 selects diverse neighbours with optional candidate extension and a pruned-connection fallback. Nodes are scored with the same SIMD kernels as `FlatIndex` (including normalized-cosine `1 - dot` and packed Hamming).
+
+Topology snapshots are captured under a short state lock; distance work and neighbour updates happen outside it. Each node has its own gate, adjacency arrays are copy-on-write, and locks are always taken in ascending id order, so inserts run concurrently with each other and with lock-free searches. Besides the bounded Algorithm 4 links, each node keeps a reciprocal spine edge to the closest surviving neighbour at each layer. The spine is exempt from pruning and is traversed by searches, which guarantees the live graph remains reachable from the entry point even in sparse regions.
+
+`Delete` marks a tombstone, sweeps every node for references to it, repairs surviving neighbours by distance-ranked links and re-connects the spine. `Compact()` rebuilds the entire graph from live vectors at the same ids and levels, atomically publishing the new topology so in-flight searches finish against the old snapshot.
+
 ## Roadmap (design intent, not yet implemented)
 
-1. **HNSW** — layered proximity graph, Algorithm 4 neighbour selection, fine-grained node locks for concurrent inserts, tombstones + `Compact()`, seeded builds.
-2. **Quantization** — int8 with trained per-dimension ranges and binary sign quantization; oversampling + full-precision rescoring driven by measured recall.
+1. **Quantization** — int8 with trained per-dimension ranges and binary sign quantization; oversampling + full-precision rescoring driven by measured recall.
 3. **Filtering** — immutable composable filters over indexed payload fields; selectivity planner chooses exact scan over candidates vs filtered graph traversal.
 4. **Hybrid** — Unicode-normalized/accent-folded tokenizer, BM25 inverted index (Robertson & Zaragoza), RRF fusion (Cormack et al. 2009).
 5. **Persistence** — versioned single-file format with WAL (CRC32C, Castagnoli), configurable fsync, torn-tail recovery, checkpoint via temp file + atomic rename. See [file-format.md](file-format.md).

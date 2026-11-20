@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Faro core &#8212; embedded, zero-server vector database for .NET: SIMD distances, exact and HNSW indexes, pooled search data structures.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Core has no external dependencies (SPEC: System.Numerics.Tensors is the only allowed one; not needed yet). -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Faro.Tests" />
+    <InternalsVisibleTo Include="Faro.RecallTests" />
+  </ItemGroup>
+
+</Project>

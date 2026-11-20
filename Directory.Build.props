@@ -1,0 +1,40 @@
+<Project>
+
+  <PropertyGroup>
+    <!-- Default target frameworks; individual projects may override (e.g. benchmarks target net10.0 only). -->
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+
+    <!-- Reproducible builds (SourceLink). -->
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <RepositoryUrl>https://github.com/hadagalberto/faro</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+
+    <!-- Native AOT / trimming friendliness. -->
+    <IsAotCompatible Condition="'$(TargetFramework)' != '' and $([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net8.0'))">true</IsAotCompatible>
+
+    <!-- Package metadata (MIT, SPEC header). -->
+    <Authors>Hadagalberto Junior</Authors>
+    <Company>Hadagalberto Junior</Company>
+    <Product>Faro</Product>
+    <Copyright>Copyright &#169; Hadagalberto Junior</Copyright>
+    <VersionPrefix>0.1.0</VersionPrefix>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/hadagalberto/faro</PackageProjectUrl>
+    <PackageTags>vector database;embeddings;hnsw;simd;semantic-search;full-text-search;dotnet</PackageTags>
+    <NeutralLanguage>en-US</NeutralLanguage>
+    <Description>Faro &#8212; embedded, zero-server vector database for .NET.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Build-time only. 10.0.404: the newest line that still targets net8.0 and whose
+         transitive Microsoft.Build.Tasks.Git is outside all ranges of GHSA-23fw-v26w-5fgq. -->
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.404" PrivateAssets="All" />
+  </ItemGroup>
+
+</Project>

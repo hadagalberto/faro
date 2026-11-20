@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" Version="4.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Faro\Faro.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\DeterministicRandom.cs" Link="Shared\DeterministicRandom.cs" />
+    <Compile Include="..\Shared\FloatAssertions.cs" Link="Shared\FloatAssertions.cs" />
+  </ItemGroup>
+
+</Project>

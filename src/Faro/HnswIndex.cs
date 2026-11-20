@@ -47,6 +47,13 @@ public sealed class HnswIndex
     private readonly bool _keepPruned;
     private readonly double _mc;
 
+    private readonly QuantizationOptions? _quantization;
+    private readonly int _codeLength;
+    private readonly object _quantLock = new();
+    private readonly List<float[]> _trainingSample = new();
+    private byte[]? _codes;
+    private Quantizer? _quantizer;
+
     private readonly object _stateLock = new();
     private readonly object _deleteLock = new();
     private HnswNode?[] _nodes;
@@ -120,6 +127,20 @@ public sealed class HnswIndex
         _keepPruned = options.KeepPrunedConnections;
         _mc = options.Mc;
         _nodes = new HnswNode?[options.InitialCapacity];
+
+        _quantization = options.Quantization;
+        if (_quantization is not null)
+        {
+            _quantization.ValidateCompatibility(_dimensions, _distance);
+            _codeLength = _quantization.CodeLengthFor(_dimensions, _distance);
+            if ((long)options.InitialCapacity * _codeLength > Array.MaxLength)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options), options.InitialCapacity, "InitialCapacity exceeds the maximum code array size.");
+            }
+
+            _codes = new byte[options.InitialCapacity * _codeLength];
+            _quantizer = _quantization.PreTrained;
+        }
     }
 
     /// <summary>Total number of nodes inserted, including tombstoned ones.</summary>
@@ -208,6 +229,30 @@ public sealed class HnswIndex
             }
 
             view = new HnswGraphView(_nodes, _count, _entryPointId, _maxLevel);
+        }
+
+        if (_quantization is not null)
+        {
+            ReadOnlySpan<float> encodeSource = _distance == Distance.Hamming ? vector : node.Vector;
+            lock (_quantLock)
+            {
+                Quantizer? quantizer = Volatile.Read(ref _quantizer);
+                if (quantizer is null)
+                {
+                    if (_trainingSample.Count < QuantizationRuntime.TrainingSampleSize)
+                    {
+                        _trainingSample.Add(encodeSource.ToArray());
+                    }
+                }
+                else if (_distance == Distance.Hamming)
+                {
+                    quantizer.EncodePacked(node.Bits!, _codes!.AsSpan(id * _codeLength, _codeLength));
+                }
+                else
+                {
+                    quantizer.Encode(encodeSource, _codes!.AsSpan(id * _codeLength, _codeLength));
+                }
+            }
         }
 
         InsertNode(node, view, oldEntry, oldMax);
@@ -891,6 +936,51 @@ public sealed class HnswIndex
         return count;
     }
 
+    /// <summary>Trains the codec (when lazy) and encodes every node exactly once, on first search.</summary>
+    private void EnsureQuantized()
+    {
+        QuantizationOptions options = _quantization!;
+        if (Volatile.Read(ref _quantizer) is not null)
+        {
+            return;
+        }
+
+        lock (_quantLock)
+        {
+            if (Volatile.Read(ref _quantizer) is not null)
+            {
+                return;
+            }
+
+            Quantizer quantizer = QuantizationRuntime.Train(options, _trainingSample, _dimensions, _distance);
+            HnswGraphView view = CaptureView();
+            for (int id = 0; id < view.Count; id++)
+            {
+                HnswNode? node = view.Nodes[id];
+                if (node is null)
+                {
+                    continue;
+                }
+
+                Span<byte> code = _codes!.AsSpan(id * _codeLength, _codeLength);
+                if (_distance == Distance.Hamming)
+                {
+                    quantizer.EncodePacked(node.Bits!, code);
+                }
+                else
+                {
+                    quantizer.Encode(node.Vector, code);
+                }
+            }
+
+            _trainingSample.Clear();
+            Volatile.Write(ref _quantizer, quantizer);
+        }
+    }
+
+    private float ScoreNodeQuantized(ReadOnlySpan<byte> queryCode, ReadOnlySpan<byte> codes, HnswNode node) =>
+        Volatile.Read(ref _quantizer)!.Distance(queryCode, codes.Slice(node.Id * _codeLength, _codeLength));
+
     private int SearchCore(ReadOnlySpan<float> query, int k, Span<SearchResult> results, int efSearch)
     {
         ValidateQuery(query);
@@ -904,6 +994,17 @@ public sealed class HnswIndex
 
         int limit = Math.Min(k, results.Length);
         int beam = Math.Max(efSearch, limit);
+        bool quantized = false;
+        if (_quantization is not null)
+        {
+            EnsureQuantized();
+            quantized = Volatile.Read(ref _quantizer) is not null;
+            if (quantized)
+            {
+                // Oversampling: widen the beam so the rescoring pass sees k * factor candidates.
+                beam = Math.Max(beam, (int)Math.Min(view.Count, (long)limit * _quantization.RescoreFactor));
+            }
+        }
 
         float[]? normalized = null;
         ReadOnlySpan<float> effective = query;
@@ -921,10 +1022,36 @@ public sealed class HnswIndex
             BitVectors.PackSignBits(query, packed.AsSpan(0, _wordsPerVector));
         }
 
+        byte[]? queryCode = null;
+        if (quantized)
+        {
+            queryCode = ArrayPool<byte>.Shared.Rent(_codeLength);
+            Span<byte> querySpan = queryCode.AsSpan(0, _codeLength);
+            if (_distance == Distance.Hamming)
+            {
+                Volatile.Read(ref _quantizer)!.EncodePacked(packed!.AsSpan(0, _wordsPerVector), querySpan);
+            }
+            else
+            {
+                Volatile.Read(ref _quantizer)!.Encode(effective, querySpan);
+            }
+        }
+
         int[] candidates = ArrayPool<int>.Shared.Rent(beam);
         try
         {
-            var scorer = new QueryScorer(this, effective, packed is null ? default : packed.AsSpan(0, _wordsPerVector));
+            ReadOnlySpan<ulong> packedQuery = packed is null ? default : packed.AsSpan(0, _wordsPerVector);
+            QueryScorer scorer;
+            if (quantized)
+            {
+                byte[] codes = _codes!;
+                scorer = new QueryScorer(this, queryCode!.AsSpan(0, _codeLength), codes.AsSpan());
+            }
+            else
+            {
+                scorer = new QueryScorer(this, effective, packedQuery);
+            }
+
             int entry = view.EntryPointId;
             int found = 0;
             for (int layer = view.MaxLevel; layer >= 0; layer--)
@@ -946,7 +1073,12 @@ public sealed class HnswIndex
                     continue;
                 }
 
-                resultHeap.PushBounded(limit, scorer.Score(node), id);
+                // Quantization only steers traversal; the returned score and ordering always
+                // come from the stored full-precision vector.
+                float score = quantized
+                    ? ScoreQueryNode(effective, packedQuery, node)
+                    : scorer.Score(node);
+                resultHeap.PushBounded(limit, score, id);
             }
 
             int written = resultHeap.Count;
@@ -968,6 +1100,11 @@ public sealed class HnswIndex
             if (packed is not null)
             {
                 ArrayPool<ulong>.Shared.Return(packed);
+            }
+
+            if (queryCode is not null)
+            {
+                ArrayPool<byte>.Shared.Return(queryCode);
             }
 
             ArrayPool<int>.Shared.Return(candidates);
@@ -1048,9 +1185,21 @@ public sealed class HnswIndex
         }
 
         int newCapacity = (int)Math.Min(Math.Max((long)required, (long)_nodes.Length * 2), Array.MaxLength);
+        if (_codes is not null && (long)newCapacity * _codeLength > Array.MaxLength)
+        {
+            throw new OutOfMemoryException($"HnswIndex cannot grow beyond {newCapacity} nodes for {_codeLength}-byte codes.");
+        }
+
         var grown = new HnswNode?[newCapacity];
         Array.Copy(_nodes, grown, _count);
         _nodes = grown;
+
+        if (_codes is not null)
+        {
+            var grownCodes = new byte[newCapacity * _codeLength];
+            Array.Copy(_codes, grownCodes, (long)_count * _codeLength);
+            _codes = grownCodes;
+        }
     }
 
     private HnswGraphView CaptureView()
@@ -1113,20 +1262,41 @@ public sealed class HnswIndex
         }
     }
 
-    /// <summary>Small stack-only wrapper that scores graph nodes against one query.</summary>
+    /// <summary>
+    /// Small stack-only wrapper that scores graph nodes against one query, either with full
+    /// precision (construction and unquantized search) or via compact codes (quantized routing).
+    /// </summary>
     private ref struct QueryScorer
     {
         private readonly HnswIndex _index;
         private readonly ReadOnlySpan<float> _query;
         private readonly ReadOnlySpan<ulong> _packed;
+        private readonly ReadOnlySpan<byte> _code;
+        private readonly ReadOnlySpan<byte> _codes;
+        private readonly bool _quantized;
 
         internal QueryScorer(HnswIndex index, ReadOnlySpan<float> query, ReadOnlySpan<ulong> packed)
         {
             _index = index;
             _query = query;
             _packed = packed;
+            _code = default;
+            _codes = default;
+            _quantized = false;
         }
 
-        internal float Score(HnswNode node) => _index.ScoreQueryNode(_query, _packed, node);
+        internal QueryScorer(HnswIndex index, ReadOnlySpan<byte> code, ReadOnlySpan<byte> codes)
+        {
+            _index = index;
+            _query = default;
+            _packed = default;
+            _code = code;
+            _codes = codes;
+            _quantized = true;
+        }
+
+        internal float Score(HnswNode node) => _quantized
+            ? _index.ScoreNodeQuantized(_code, _codes, node)
+            : _index.ScoreQueryNode(_query, _packed, node);
     }
 }

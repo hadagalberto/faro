@@ -2,7 +2,7 @@
 
 **Faro** is an embedded, zero-server vector database for .NET — "SQLite for embeddings". One NuGet package, one file on disk, SIMD distance kernels, exact and approximate indexes, and a path into Semantic Kernel / Microsoft.Extensions.AI RAG pipelines. MIT licensed, targets `net8.0` and `net10.0`, and is built to be Native AOT and trimming compatible.
 
-> **Status — Milestone 2:** the exact-search foundation (SIMD + scalar distances, pooled heaps/visited sets, `FlatIndex`) is joined by `HnswIndex`: Algorithm 4 neighbour selection, deterministic builds, concurrent inserts with fine-grained locks, tombstone deletes with neighbour repair and `Compact()`. Recall is measured against Flat on 50k x 128-d clustered data. Quantization, filtering, BM25 hybrid search, WAL persistence and the VectorData connector are designed but not shipped yet; see [docs/architecture.md](docs/architecture.md).
+> **Status — Milestone 3:** on top of the exact `FlatIndex` and the `HnswIndex` (Algorithm 4, deterministic builds, concurrent inserts, tombstone deletes and `Compact()`), collections can now quantize vectors — symmetric int8 with quantile clipping and binary sign codes — and use oversampling plus full-precision rescoring. Recall gates measure `int8 + rescore(4) ≥ 0.95` and `binary + rescore(8) ≥ 0.85` on 768-d normalized data against Flat ground truth. Filtering, BM25 hybrid search, WAL persistence and the VectorData connector are designed but not shipped yet; see [docs/architecture.md](docs/architecture.md).
 
 ## Why Faro
 
@@ -14,7 +14,7 @@ Most .NET HNSW packages hand you a bare index. Faro aims at the complete databas
 | SIMD + scalar reference kernels with equivalence tests | ✅ | sometimes |
 | Pooled heaps / visited sets (no per-search allocations) | ✅ | — |
 | HNSW with deterministic builds, concurrent inserts and neighbour repair | ✅ | ✅ |
-| Scalar/binary quantization with rescoring | planned | — |
+| Scalar int8 / binary quantization with quantile clipping and rescoring | ✅ | — |
 | Payload filters with selectivity-aware planning | planned | — |
 | BM25 full-text + RRF hybrid search | planned | — |
 | Single-file persistence with WAL + recovery | planned | — |
@@ -70,6 +70,36 @@ index.Compact();          // rebuild without deleted nodes, ids unchanged
 ```
 
 `ExtendCandidates` (default on) and `KeepPrunedConnections` control Algorithm 4; `Mc` relaxes its diversity test. Inserts may run in parallel with each other and with searches. The span `Search(query, k, buffer)` overload is allocation-free in steady state. Recall gates live in `tests/Faro.RecallTests`.
+
+## Quantization
+
+Both indexes accept an optional `Quantization` option. Searches score compact codes first, keep `k * rescore` candidates, then rescore them against the stored full-precision vectors before returning the best `k`. The returned score is always the full-precision one.
+
+```csharp
+// Train on a representative sample (recommended for reproducible ranges).
+var scalar = ScalarQuantizer.Train(sample, Dimensions, Distance.Cosine, quantile: 0.995);
+var index = new HnswIndex(new HnswOptions
+{
+    Dimensions = 768,
+    Quantization = Quantization.Int8(scalar, rescore: 4),
+});
+
+// Or train lazily from the first vectors added to the index:
+var flat8 = new FlatIndex(new FlatOptions
+{
+    Dimensions = 768,
+    Quantization = Quantization.Int8(rescore: 4, quantile: 0.995),
+});
+
+// Binary sign codes (1 bit/dimension) with a wider rescore window:
+var binary = new FlatIndex(new FlatOptions
+{
+    Dimensions = 768,
+    Quantization = Quantization.Binary(rescore: 8),
+});
+```
+
+`ScalarQuantizer` trains per-dimension `min`/`max` (or quantile-clipped bounds) and encodes one signed byte per dimension; int8 distances use `Vector512/256/128` integer kernels. `BinaryQuantizer` packs signs 64 per word and uses popcount Hamming. Graph construction always uses full precision; quantization only steers search traversal. Measured recall is in `tests/Faro.RecallTests/QuantizationRecallTests.cs`.
 
 ## Distances
 

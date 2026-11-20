@@ -69,4 +69,12 @@ public sealed class HnswOptions
 
     /// <summary>Initial node capacity. Defaults to 1024. Storage grows by doubling on demand.</summary>
     public int InitialCapacity { get; set; } = 1024;
+
+    /// <summary>
+    /// Optional per-collection quantization. Graph construction always uses full precision;
+    /// searches route with compact codes and rescore an oversampled candidate set against the
+    /// stored vectors. A codec can be supplied pretrained or trained lazily from the first nodes
+    /// added to the index.
+    /// </summary>
+    public QuantizationOptions? Quantization { get; set; }
 }

@@ -41,6 +41,13 @@ public sealed class FlatIndex
     private readonly int _elementsPerVector;
     private readonly int _parallelThreshold;
 
+    private readonly QuantizationOptions? _quantization;
+    private readonly int _codeLength;
+    private readonly object _quantLock = new();
+    private readonly List<float[]> _trainingSample = new();
+    private byte[]? _codes;
+    private Quantizer? _quantizer;
+
     private float[]? _vectors;
     private ulong[]? _bits;
     private int _capacity;
@@ -103,6 +110,20 @@ public sealed class FlatIndex
         {
             _vectors = new float[_capacity * _dimensions];
         }
+
+        _quantization = options.Quantization;
+        if (_quantization is not null)
+        {
+            _quantization.ValidateCompatibility(_dimensions, _distance);
+            _codeLength = _quantization.CodeLengthFor(_dimensions, _distance);
+            if ((long)_capacity * _codeLength > Array.MaxLength)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options), options.InitialCapacity, "InitialCapacity exceeds the maximum code array size.");
+            }
+
+            _codes = new byte[_capacity * _codeLength];
+            _quantizer = _quantization.PreTrained;
+        }
     }
 
     /// <summary>Number of vectors currently stored.</summary>
@@ -142,7 +163,38 @@ public sealed class FlatIndex
             vector.CopyTo(_vectors!.AsSpan(id * _dimensions, _dimensions));
         }
 
-        Volatile.Write(ref _count, id + 1);
+        if (_quantization is null)
+        {
+            Volatile.Write(ref _count, id + 1);
+        }
+        else
+        {
+            ReadOnlySpan<float> encodeSource = _distance == Distance.Hamming ? vector : StoredVector(id);
+            lock (_quantLock)
+            {
+                Quantizer? quantizer = Volatile.Read(ref _quantizer);
+                if (quantizer is null)
+                {
+                    if (_trainingSample.Count < QuantizationRuntime.TrainingSampleSize)
+                    {
+                        _trainingSample.Add(encodeSource.ToArray());
+                    }
+                }
+                else if (_distance == Distance.Hamming)
+                {
+                    quantizer.EncodePacked(_bits!.AsSpan(id * _wordsPerVector, _wordsPerVector), _codes!.AsSpan(id * _codeLength, _codeLength));
+                }
+                else
+                {
+                    quantizer.Encode(encodeSource, _codes!.AsSpan(id * _codeLength, _codeLength));
+                }
+
+                // Publishing the count under the same lock as code creation keeps training and
+                // encoding consistent with concurrent adds (see EnsureQuantized).
+                Volatile.Write(ref _count, id + 1);
+            }
+        }
+
         return id;
     }
 
@@ -247,6 +299,16 @@ public sealed class FlatIndex
 
     private void SearchCore(ReadOnlySpan<float> query, int limit, Span<SearchResult> results, int n)
     {
+        if (_quantization is not null)
+        {
+            EnsureQuantized();
+            if (Volatile.Read(ref _quantizer) is not null)
+            {
+                SearchQuantized(query, limit, results, n);
+                return;
+            }
+        }
+
         if (n >= _parallelThreshold && n >= 2)
         {
             SearchParallel(query, limit, results, n);
@@ -254,6 +316,129 @@ public sealed class FlatIndex
         else
         {
             SearchSequential(query, limit, results, n);
+        }
+    }
+
+    private ReadOnlySpan<float> StoredVector(int id) => _vectors!.AsSpan(id * _dimensions, _dimensions);
+
+    /// <summary>
+    /// Trains the codec (when lazy) and encodes every stored vector exactly once. Called under
+    /// <see cref="_quantLock"/> from searches; the first search pays the one-off cost.
+    /// </summary>
+    private void EnsureQuantized()
+    {
+        QuantizationOptions options = _quantization!;
+        if (Volatile.Read(ref _quantizer) is not null)
+        {
+            return;
+        }
+
+        lock (_quantLock)
+        {
+            if (Volatile.Read(ref _quantizer) is not null)
+            {
+                return;
+            }
+
+            Quantizer quantizer = QuantizationRuntime.Train(options, _trainingSample, _dimensions, _distance);
+            int n = SnapshotCount();
+            for (int id = 0; id < n; id++)
+            {
+                Span<byte> code = _codes!.AsSpan(id * _codeLength, _codeLength);
+                if (_distance == Distance.Hamming)
+                {
+                    quantizer.EncodePacked(_bits!.AsSpan(id * _wordsPerVector, _wordsPerVector), code);
+                }
+                else
+                {
+                    quantizer.Encode(StoredVector(id), code);
+                }
+            }
+
+            _trainingSample.Clear();
+            Volatile.Write(ref _quantizer, quantizer);
+        }
+    }
+
+    /// <summary>
+    /// Two-pass quantized search: scan all codes for the top <c>k * rescore</c> candidates, then
+    /// rescore those against the stored full-precision vectors and keep the best <c>k</c>.
+    /// </summary>
+    private void SearchQuantized(ReadOnlySpan<float> query, int limit, Span<SearchResult> results, int n)
+    {
+        Quantizer quantizer = Volatile.Read(ref _quantizer)!;
+        byte[] queryCode = ArrayPool<byte>.Shared.Rent(_codeLength);
+        int candidateLimit = (int)Math.Min(n, (long)limit * _quantization!.RescoreFactor);
+        int[] candidateIds = ArrayPool<int>.Shared.Rent(candidateLimit);
+        float[]? normalizedQuery = null;
+        ulong[]? packedQuery = null;
+        ReadOnlySpan<float> effective = query;
+
+        try
+        {
+            if (_normalize)
+            {
+                normalizedQuery = ArrayPool<float>.Shared.Rent(_dimensions);
+                Distances.CopyNormalized(query, normalizedQuery.AsSpan(0, _dimensions));
+                effective = normalizedQuery.AsSpan(0, _dimensions);
+            }
+
+            if (_distance == Distance.Hamming)
+            {
+                packedQuery = ArrayPool<ulong>.Shared.Rent(_wordsPerVector);
+                BitVectors.PackSignBits(query, packedQuery);
+            }
+
+            Span<byte> querySpan = queryCode.AsSpan(0, _codeLength);
+            if (_distance == Distance.Hamming)
+            {
+                quantizer.EncodePacked(packedQuery!.AsSpan(0, _wordsPerVector), querySpan);
+            }
+            else
+            {
+                quantizer.Encode(effective, querySpan);
+            }
+
+            HeapOrder order = TopKOrder(_distance);
+            using var codeHeap = DistanceHeap.Rent(order, candidateLimit);
+            byte[] codes = _codes!;
+            for (int id = 0; id < n; id++)
+            {
+                float score = quantizer.Distance(querySpan, codes.AsSpan(id * _codeLength, _codeLength));
+                codeHeap.PushBounded(candidateLimit, score, id);
+            }
+
+            int found = codeHeap.Count;
+            int index = found;
+            while (codeHeap.TryPop(out _, out int id))
+            {
+                candidateIds[--index] = id;
+            }
+
+            using var resultHeap = DistanceHeap.Rent(order, limit);
+            float[]? vectors = _vectors;
+            ulong[]? bits = _bits;
+            for (int i = 0; i < found; i++)
+            {
+                int id = candidateIds[i];
+                resultHeap.PushBounded(limit, ScoreVector(effective, packedQuery, vectors, bits, id), id);
+            }
+
+            DrainBestFirst(resultHeap, results);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(queryCode);
+            ArrayPool<int>.Shared.Return(candidateIds);
+            if (normalizedQuery is not null)
+            {
+                ArrayPool<float>.Shared.Return(normalizedQuery);
+            }
+
+            if (packedQuery is not null)
+            {
+                ArrayPool<ulong>.Shared.Return(packedQuery);
+            }
         }
     }
 
@@ -486,6 +671,13 @@ public sealed class FlatIndex
             var grown = new float[newCapacity * _dimensions];
             Array.Copy(_vectors!, grown, (long)_count * _dimensions);
             _vectors = grown;
+        }
+
+        if (_codes is not null)
+        {
+            var grownCodes = new byte[newCapacity * _codeLength];
+            Array.Copy(_codes, grownCodes, (long)_count * _codeLength);
+            _codes = grownCodes;
         }
 
         _capacity = newCapacity;

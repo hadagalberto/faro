@@ -2,7 +2,7 @@
 
 **Faro** é um banco de dados vetorial embutido e sem servidor para .NET — "SQLite para embeddings". Um pacote NuGet, um arquivo em disco, kernels de distância SIMD, índice exato e (em marcos futuros) índices aproximados, além de um caminho para pipelines RAG com Semantic Kernel / Microsoft.Extensions.AI. Licença MIT, alvos `net8.0` e `net10.0`, compatível com Native AOT e trimming.
 
-> **Status — Marco 2:** a base exata (distâncias SIMD + referência escalar, heaps/visitados em pool, `FlatIndex`) agora conta com `HnswIndex`: seleção de vizinhos Algoritmo 4, construção determinística, inserts concorrentes com locks finos, deletes com tombstone e reparo de vizinhos, além de `Compact()`. O recall é medido contra o Flat em 50 mil vetores x 128 dimensões. Quantização, filtros, BM25, WAL e o conector VectorData seguem planejados; veja [docs/architecture.md](docs/architecture.md).
+> **Status — Marco 3:** além do `FlatIndex` exato e do `HnswIndex` (Algoritmo 4, construção determinística, inserts concorrentes, deletes com tombstone e `Compact()`), coleções agora podem quantizar vetores — int8 simétrico com clipping por quantil e códigos binários de sinal — com oversampling e rescore em precisão total. Os gates de recall medem `int8 + rescore(4) ≥ 0,95` e `binary + rescore(8) ≥ 0,85` em dados normalizados de 768 dimensões contra o Flat. Filtros, BM25, WAL e o conector VectorData seguem planejados; veja [docs/architecture.md](docs/architecture.md).
 
 ## Por que Faro
 
@@ -14,7 +14,7 @@ A maioria das bibliotecas HNSW para .NET entrega apenas um índice. Faro visa o 
 | Kernels SIMD + referência escalar com testes de equivalência | ✅ | às vezes |
 | Heaps e conjuntos de visitados em pool (sem alocação por busca) | ✅ | — |
 | HNSW com construção determinística, inserts concorrentes e reparo de vizinhos | ✅ | ✅ |
-| Quantização escalar/binária com rescore | planejado | — |
+| Quantização int8/binária com clipping por quantil e rescore | ✅ | — |
 | Filtros de payload com planejamento por seletividade | planejado | — |
 | BM25 + fusão RRF | planejado | — |
 | Persistência em arquivo único com WAL e recuperação | planejado | — |
@@ -37,6 +37,29 @@ SearchResult[] hits = index.Search(queryEmbedding, k: 10);
 ```
 
 Os resultados vêm em ordem do melhor para o pior — score crescente para Cosine / Euclidean / Hamming, decrescente para DotProduct — com empates exatos desempatados por id crescente. A busca sequencial não aloca nada além do array retornado na sobrecarga com alocação.
+
+## Quantização
+
+Ambos os índices aceitam a opção `Quantization`. A busca pontua códigos compactos primeiro, mantém `k * rescore` candidatos e então faz rescore contra os vetores originais em precisão total antes de retornar os melhores `k`. O score retornado é sempre o de precisão total.
+
+```csharp
+// Treine em uma amostra representativa (recomendado para faixas reproduzíveis).
+var scalar = ScalarQuantizer.Train(amostra, Dimensions, Distance.Cosine, quantile: 0.995);
+var index = new HnswIndex(new HnswOptions
+{
+    Dimensions = 768,
+    Quantization = Quantization.Int8(scalar, rescore: 4),
+});
+
+// Ou treine sob demanda com os primeiros vetores adicionados:
+var flat8 = new FlatIndex(new FlatOptions
+{
+    Dimensions = 768,
+    Quantization = Quantization.Int8(rescore: 4, quantile: 0.995),
+});
+```
+
+`ScalarQuantizer` treina `min`/`max` por dimensão (ou limites com clipping por quantil) e codifica um byte assinado por dimensão; distâncias int8 usam kernels inteiros `Vector512/256/128`. `BinaryQuantizer` empacota sinais 64 por palavra e usa popcount Hamming. A construção do grafo sempre usa precisão total; a quantização apenas guia a travessia na busca. O recall medido está em `tests/Faro.RecallTests/QuantizationRecallTests.cs`.
 
 ## Distâncias
 

@@ -6,11 +6,20 @@ All notable changes to Faro are documented here. The format follows [Keep a Chan
 
 ### Planned
 
-- Scalar/binary quantization with oversampling and full-precision rescoring.
 - Composable payload filters with selectivity-aware execution.
 - BM25 full-text index and vector/keyword fusion (RRF, weighted scores).
 - Single-file `.faro` persistence with WAL and crash recovery.
 - `Microsoft.Extensions.VectorData` connector and integration tests.
+
+## [0.3.0] — Milestone 3
+
+### Added
+
+- `ScalarQuantizer`: symmetric per-dimension int8 trained on a sample, with optional quantile clipping, encode/decode, and int8 SIMD dot/squared-distance kernels (`Vector512`/`Vector256`/`Vector128` + scalar reference).
+- `BinaryQuantizer`: 1-bit sign codes packed 64 per word with popcount Hamming distances; shared with the existing `BitVectors`/`BitKernels` helpers.
+- `Quantization` factory with configurable oversampling/rescore factor, pretrained codecs and lazy training from the vectors added before the first search.
+- Quantization integrated into `FlatIndex` and `HnswIndex`: codes steer the first candidate pass, oversampled survivors are rescored against full-precision vectors, and returned scores are always full precision. Graph construction stays full precision.
+- Quantizer unit tests (trained ranges, quantile clipping, encode/decode extremes, hand-computed Hamming/bit codes, SIMD path equivalence, invalid-input contracts), quantized index integration/zero-allocation tests, and recall gates: int8 + rescore(4) ≥ 0.95 and binary + rescore(8) ≥ 0.85 on 768-d normalized data for both Flat and HNSW.
 
 ## [0.2.0] — Milestone 2
 

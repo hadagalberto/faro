@@ -38,6 +38,10 @@ dotnet run -c Release -f net10.0 --project benchmarks/Faro.Benchmarks -- --filte
 
 BenchmarkDotNet pinning and hardware reporting make these numbers machine-specific; always state the CPU and runtime version when sharing results. Recall gates live in `tests/Faro.RecallTests` and print their own table.
 
+## Quantization knobs
+
+`Quantization.Int8(rescore, quantile)` trains per-dimension ranges; `quantile` (e.g. 0.995) clips outliers so the byte is spent on the bulk of the distribution. `Quantization.Binary(rescore)` trades one bit per dimension for a popcount first pass. `rescore` is the oversampling factor: larger values recover more full-precision recall at the cost of rescoring more candidates. On 768-d normalized data, `rescore = 4` for int8 and `rescore = 8` for binary clear the SPEC gates; raise them if your data is less clustered. Supply a pretrained `ScalarQuantizer`/`BinaryQuantizer` for reproducible ranges, otherwise the index trains once from the first vectors added.
+
 ## Planned knobs
 
-HNSW will expose `M`, `EfConstruction`, `EfSearch`, a deterministic build seed, and neighbour-selection options; quantization will expose int8/binary modes with a rescoring oversampling factor; durability will expose `Always`/`Batched`/`None`. These are documented here as design intent and are not available in Milestone 1.
+HNSW exposes `M`, `EfConstruction`, `EfSearch`, a deterministic build seed, and neighbour-selection options; durability will expose `Always`/`Batched`/`None`. These are documented here as design intent and are not available in Milestone 3.

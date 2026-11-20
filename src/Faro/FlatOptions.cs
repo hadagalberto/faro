@@ -27,4 +27,12 @@ public sealed class FlatOptions
     /// search in tests or benchmarks.
     /// </summary>
     public int ParallelThreshold { get; set; } = 4096;
+
+    /// <summary>
+    /// Optional per-collection quantization. When set, searches score compact codes first and
+    /// rescore the oversampled survivors against the stored full-precision vectors. A codec can
+    /// be supplied pretrained (recommended for reproducibility) or trained lazily from the first
+    /// vectors added to the index.
+    /// </summary>
+    public QuantizationOptions? Quantization { get; set; }
 }

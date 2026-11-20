@@ -4,9 +4,9 @@
 
 | Layer | Project | Status | Responsibility |
 | --- | --- | --- | --- |
-| Core | `src/Faro` | Milestone 2 | Metrics, storage, exact + HNSW indexes, pooled search structures |
+| Core | `src/Faro` | Milestone 3 | Metrics, storage, exact + HNSW indexes, quantization, pooled search structures |
 | Connector | `src/Faro.VectorData` | planned | `Microsoft.Extensions.VectorData` record definitions, LINQ filter translation, hybrid search adapter |
-| Quality gates | `tests/Faro.Tests`, `tests/Faro.RecallTests` | Milestone 2 | Equivalence, invariants, concurrency, allocations, recall |
+| Quality gates | `tests/Faro.Tests`, `tests/Faro.RecallTests` | Milestone 3 | Equivalence, invariants, concurrency, allocations, recall (including quantized recall) |
 | Tooling | `benchmarks/Faro.Benchmarks`, `samples/Faro.Samples.Rag` | Milestone 1 | Throughput/latency measurement and an offline end-to-end sample |
 
 The core is intentionally dependency-free (only `System.Numerics.Tensors` is allowed by SPEC, and it is not needed yet). This keeps Native AOT and trimming predictable.
@@ -49,9 +49,14 @@ Topology snapshots are captured under a short state lock; distance work and neig
 
 `Delete` marks a tombstone, sweeps every node for references to it, repairs surviving neighbours by distance-ranked links and re-connects the spine. `Compact()` rebuilds the entire graph from live vectors at the same ids and levels, atomically publishing the new topology so in-flight searches finish against the old snapshot.
 
+## Quantization
+
+`ScalarQuantizer` trains per-dimension `min`/`max` (or quantile-clipped bounds) on a bounded sample and derives `scale = max(|min|,|max|)/127`; codes are signed bytes clamped to [-127,127]. `Int8Kernels` widen sbyte -> short -> int and multiply in SIMD lanes, with explicit 512/256/128 and scalar paths whose integer results are identical. `BinaryQuantizer` reuses `BitVectors.PackSignBits` and `BitKernels.Hamming` (popcount). Distances are returned in the collection metric's ordering convention.
+
+An index with `Quantization` stores codes alongside full vectors. The first pass scores codes and keeps `k * rescore` candidates; the second pass scores those with the exact SIMD kernels and keeps `k`, so returned scores are full precision. HNSW construction never uses codes — quantization only replaces the routing scorer during search, with the beam widened to the oversampling window. A pretrained codec makes builds reproducible; otherwise training happens once on first search from the first vectors added.
+
 ## Roadmap (design intent, not yet implemented)
 
-1. **Quantization** — int8 with trained per-dimension ranges and binary sign quantization; oversampling + full-precision rescoring driven by measured recall.
 3. **Filtering** — immutable composable filters over indexed payload fields; selectivity planner chooses exact scan over candidates vs filtered graph traversal.
 4. **Hybrid** — Unicode-normalized/accent-folded tokenizer, BM25 inverted index (Robertson & Zaragoza), RRF fusion (Cormack et al. 2009).
 5. **Persistence** — versioned single-file format with WAL (CRC32C, Castagnoli), configurable fsync, torn-tail recovery, checkpoint via temp file + atomic rename. See [file-format.md](file-format.md).

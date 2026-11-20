@@ -1,3 +1,5 @@
+using Faro.Persistence;
+
 namespace Faro.Internal;
 
 /// <summary>
@@ -30,20 +32,20 @@ internal sealed class HnswNode
 {
     internal readonly int Id;
     internal readonly int Level;
-    internal readonly float[] Vector;
-    internal readonly ulong[]? Bits;
     internal readonly object Gate = new();
 
+    private VectorData _vector;
+    private VectorData? _bits;
     private int[][] _neighbors;
     private int[][] _backbone;
     private int _deleted;
 
-    internal HnswNode(int id, int level, float[] vector, ulong[]? bits, int layers)
+    internal HnswNode(int id, int level, VectorData vector, VectorData? bits, int layers)
     {
         Id = id;
         Level = level;
-        Vector = vector;
-        Bits = bits;
+        _vector = vector;
+        _bits = bits;
         _neighbors = CreateEmpty(layers);
         _backbone = CreateEmpty(layers);
     }
@@ -63,6 +65,47 @@ internal sealed class HnswNode
     {
         get => Volatile.Read(ref _deleted) != 0;
         set => Volatile.Write(ref _deleted, value ? 1 : 0);
+    }
+
+    /// <summary>Returns the immutable vector descriptor, possibly backed by a memory-mapped page.</summary>
+    internal VectorData Vector => Volatile.Read(ref _vector);
+
+    /// <summary>Returns the packed sign bits for Hamming collections, or <see langword="null"/>.</summary>
+    internal VectorData? Bits => Volatile.Read(ref _bits);
+
+    internal void SetVector(VectorData vector, VectorData? bits)
+    {
+        lock (Gate)
+        {
+            Volatile.Write(ref _vector, vector);
+            Volatile.Write(ref _bits, bits);
+        }
+    }
+
+    /// <summary>Replaces the entire topology with a checkpoint snapshot.</summary>
+    internal void SetTopology(int[][] neighbors, int[][] backbone)
+    {
+        lock (Gate)
+        {
+            Volatile.Write(ref _neighbors, neighbors);
+            Volatile.Write(ref _backbone, backbone);
+        }
+    }
+
+    /// <summary>Points mapped vector slices at the newest checkpoint mapping.</summary>
+    internal void Rebind(MappedVectorRegion region)
+    {
+        VectorData vector = Vector;
+        VectorData? bits = Bits;
+        if (vector.IsMapped)
+        {
+            Volatile.Write(ref _vector, vector.Remap(region));
+        }
+
+        if (bits is { IsMapped: true })
+        {
+            Volatile.Write(ref _bits, bits.Remap(region));
+        }
     }
 
     /// <summary>Returns a consistent snapshot of all per-layer Algorithm 4 adjacency arrays.</summary>

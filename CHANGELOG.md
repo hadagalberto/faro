@@ -6,10 +6,19 @@ All notable changes to Faro are documented here. The format follows [Keep a Chan
 
 ### Planned
 
-- Composable payload filters with selectivity-aware execution.
-- BM25 full-text index and vector/keyword fusion (RRF, weighted scores).
-- Single-file `.faro` persistence with WAL and crash recovery.
 - `Microsoft.Extensions.VectorData` connector and integration tests.
+
+## [0.5.0] — Milestone 5
+
+### Added
+
+- `FaroDb` / `FaroDbCollection<TKey,TPayload>`: open or create a single-file database, `InMemory()` mode, generic keys (`int`, `long`, `Guid`, `string`), batch upsert, sync and async APIs with `CancellationToken`, `Flush`/`Checkpoint` and their async variants.
+- Versioned `.faro` checkpoint format with header/page checksums and 64-byte-aligned pages; deterministic bytes for identical operation logs. See `docs/file-format.md`.
+- CRC32C (Castagnoli) write-ahead log with per-record checksums and `Always` / `Batched` / `None` durability modes.
+- Recovery on open: replay valid records in order, ignore and truncate a torn tail, and rebuild a connected HNSW graph from the stored vectors and levels.
+- Checkpointing through a temporary file, fsync and atomic rename; WAL reset only after the rename is durable.
+- Read-only memory mapping of checkpoint vector pages (float vectors and packed Hamming bits), with rebinding after a checkpoint.
+- Persistence tests: CRC32C known vectors, byte/key codecs, checkpoint round-trips (all metrics, quantization, filters, hybrid), WAL-only replay, durability modes, in-memory mode, generic keys, async contracts, deterministic bytes and crash simulation at random truncation offsets proving prefix consistency.
 
 ## [0.3.0] — Milestone 3
 

@@ -216,6 +216,30 @@ public sealed class Bm25Index
         }
     }
 
+    /// <summary>Exports postings and document lengths for the checkpoint text page.</summary>
+    internal Bm25Snapshot Export()
+    {
+        lock (_gate)
+        {
+            var documents = new Bm25Snapshot.DocumentSnapshot[_docLengths.Count];
+            int index = 0;
+            foreach ((int docId, int length) in _docLengths)
+            {
+                var terms = new (string, int)[_docTerms[docId].Count];
+                int t = 0;
+                foreach ((string term, int frequency) in _docTerms[docId])
+                {
+                    terms[t++] = (term, frequency);
+                }
+
+                documents[index++] = new Bm25Snapshot.DocumentSnapshot(docId, length, terms);
+            }
+
+            Array.Sort(documents, static (a, b) => a.DocId.CompareTo(b.DocId));
+            return new Bm25Snapshot(documents);
+        }
+    }
+
     /// <summary>Renders the index statistics, useful for diagnostics.</summary>
     /// <returns>A short human-readable summary.</returns>
     public override string ToString()

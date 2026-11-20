@@ -2,7 +2,7 @@
 
 **Faro** is an embedded, zero-server vector database for .NET — "SQLite for embeddings". One NuGet package, one file on disk, SIMD distance kernels, exact and approximate indexes, and a path into Semantic Kernel / Microsoft.Extensions.AI RAG pipelines. MIT licensed, targets `net8.0` and `net10.0`, and is built to be Native AOT and trimming compatible.
 
-> **Status — Milestone 4:** on top of exact/HNSW indexes and quantization with rescoring, `FaroCollection<T>` now stores typed payloads via source-generated System.Text.JSON metadata, indexes keyword/numeric/bool/tag fields, composes immutable filters, plans selective searches (exact over candidates vs adaptive filtered HNSW traversal), and fuses vector + BM25 rankings with RRF or weighted scores. Recall gates cover `int8`/`binary` rescoring and filtered recall ≥ 0.9 at 1% selectivity. WAL persistence and the VectorData connector are designed but not shipped yet; see [docs/architecture.md](docs/architecture.md).
+> **Status — Milestone 5:** on top of exact/HNSW indexes, quantization with rescoring, typed payloads, filters and BM25 hybrid search, `FaroDb` now provides a versioned single-file format, a CRC32C write-ahead log with configurable durability, torn-tail crash recovery, atomic checkpoints, memory-mapped vector reads, in-memory mode, generic keys and sync/async batch APIs. The `Microsoft.Extensions.VectorData` connector is still planned; see [docs/architecture.md](docs/architecture.md).
 
 ## Why Faro
 
@@ -17,7 +17,7 @@ Most .NET HNSW packages hand you a bare index. Faro aims at the complete databas
 | Scalar int8 / binary quantization with quantile clipping and rescoring | ✅ | — |
 | Payload filters with selectivity-aware planning | ✅ | — |
 | BM25 full-text + RRF hybrid search | ✅ | — |
-| Single-file persistence with WAL + recovery | planned | — |
+| Single-file persistence with CRC32C WAL + crash recovery | ✅ | — |
 | Microsoft.Extensions.VectorData connector | planned | — |
 
 ## Quick start
@@ -140,6 +140,41 @@ HybridResult[] hybrid = docs.HybridSearch(
 ```
 
 Filters are immutable and composable with `&`, `|` and `!`. The planner estimates selectivity from the payload indexes: a filter matching few vectors is scored exactly over its candidate ids; a broad filter traverses the HNSW graph with the predicate applied during traversal and an adaptive beam (`baseEf / selectivity`, capped). BM25 tokenization normalizes Unicode, folds accents ("ação" matches "acao") and removes English/Portuguese stopwords. Fusion is reciprocal rank fusion (Cormack et al., 2009) or min-max normalized weighted score fusion.
+
+## Database, persistence and durability
+
+`FaroDb` is the database layer around the indexes. One call opens (or creates) a `.faro` checkpoint plus its `.faro.wal` log; `FaroDb.InMemory()` gives the same API with no files.
+
+```csharp
+using Faro;
+
+using var db = FaroDb.Open("knowledge.faro", new FaroOptions
+{
+    Durability = Durability.Batched, // Always | Batched (default) | None
+});
+
+var docs = db.GetOrCreateCollection("docs", new CollectionOptions<Doc>
+{
+    Dimensions = 768,
+    Distance = Distance.Cosine,
+    Index = new HnswOptions { M = 16, EfConstruction = 200, EfSearch = 64 },
+    Quantization = Quantization.Int8(rescore: 4),
+    Schema = schema,                                  // PayloadSchema<Doc>
+    TypeInfo = DocContext.Default.Doc,                // source-generated JsonTypeInfo<Doc>
+    FullTextField = d => d.Text,
+});
+
+docs.Upsert("doc-1", embedding, doc);                 // string keys; long, Guid and int also work
+docs.UpsertBatch(items);                              // parallelised HNSW insertion
+await docs.UpsertAsync("doc-2", embedding, doc);      // async variants accept CancellationToken
+
+SearchHit<string>[] hits = docs.Search(queryEmbedding, k: 10, filter: Filter.Eq("tenant", "acme"));
+HybridHit<string>[] hybrid = docs.HybridSearch(queryEmbedding, "ação", k: 10);
+
+db.Checkpoint();                                      // temp file + atomic rename; resets the WAL
+```
+
+Open replays the WAL and truncates a torn tail, so a crash leaves a consistent prefix of committed operations. Vector pages of the checkpoint are memory-mapped; vectors added after the last checkpoint are held in arrays. Checkpoints are byte-deterministic for the same operation log, and the full byte layout is documented in [docs/file-format.md](docs/file-format.md). Do not search a database instance while checkpointing it.
 
 ## Distances
 

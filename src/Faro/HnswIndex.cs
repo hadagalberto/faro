@@ -1,5 +1,7 @@
 using System.Buffers;
+using System.Runtime.InteropServices;
 using Faro.Internal;
+using Faro.Persistence;
 
 namespace Faro;
 
@@ -225,7 +227,12 @@ public sealed class HnswIndex
 
             int level = AssignLevel(id);
             EnsureCapacity(id + 1);
-            node = new HnswNode(id, level, stored, bits, level);
+            node = new HnswNode(
+                id,
+                level,
+                VectorData.FromFloats(stored),
+                bits is null ? null : VectorData.FromBits(bits),
+                level);
             _nodes[id] = node;
             _count = id + 1;
             if (_maxLevel < level)
@@ -239,7 +246,7 @@ public sealed class HnswIndex
 
         if (_quantization is not null)
         {
-            ReadOnlySpan<float> encodeSource = _distance == Distance.Hamming ? vector : node.Vector;
+            ReadOnlySpan<float> encodeSource = _distance == Distance.Hamming ? vector : node.Vector.Floats;
             lock (_quantLock)
             {
                 Quantizer? quantizer = Volatile.Read(ref _quantizer);
@@ -252,7 +259,7 @@ public sealed class HnswIndex
                 }
                 else if (_distance == Distance.Hamming)
                 {
-                    quantizer.EncodePacked(node.Bits!, _codes!.AsSpan(id * _codeLength, _codeLength));
+                    quantizer.EncodePacked(node.Bits!.Bits, _codes!.AsSpan(id * _codeLength, _codeLength));
                 }
                 else
                 {
@@ -467,9 +474,9 @@ public sealed class HnswIndex
                         continue;
                     }
 
-                    float[] vector = (float[])old.Vector.Clone();
-                    ulong[]? bits = old.Bits is null ? null : (ulong[])old.Bits.Clone();
-                    newNodes[id] = new HnswNode(id, old.Level, vector, bits, old.Level);
+                    // Vector descriptors are immutable (updates swap the descriptor), so they can
+                    // be shared with the old snapshot — including mapped checkpoint slices.
+                    newNodes[id] = new HnswNode(id, old.Level, old.Vector, old.Bits, old.Level);
                     live++;
                 }
 
@@ -534,11 +541,11 @@ public sealed class HnswIndex
 
         if (_distance == Distance.Hamming)
         {
-            BitVectors.UnpackSignBits(node.Bits!, _dimensions, destination);
+            BitVectors.UnpackSignBits(node.Bits!.Bits, _dimensions, destination);
         }
         else
         {
-            node.Vector.CopyTo(destination);
+            node.Vector.Floats.CopyTo(destination);
         }
 
         return true;
@@ -555,7 +562,7 @@ public sealed class HnswIndex
             return; // first node in the graph (or sole node at a new top layer)
         }
 
-        var scorer = new QueryScorer(this, node.Vector, node.Bits);
+        var scorer = new QueryScorer(this, node.Vector.Floats, (node.Bits is null ? default : node.Bits.Bits));
         int[] buffer = ArrayPool<int>.Shared.Rent(Math.Max(_efConstruction, 1));
         try
         {
@@ -638,7 +645,7 @@ public sealed class HnswIndex
                     // candidate's neighbourhood here would make each insert O(M * ef * degree).
                     int[] pruned = SelectNeighbors(
                         b, links, layer, maxDegree,
-                        new QueryScorer(this, b.Vector, b.Bits), view, extend: false, protectedId: a.Id);
+                        new QueryScorer(this, b.Vector.Floats, b.Bits is null ? default : b.Bits.Bits), view, extend: false, protectedId: a.Id);
                     b.SetLinks(layer, pruned);
                 }
             }
@@ -648,7 +655,7 @@ public sealed class HnswIndex
     /// <summary>Returns the closest live candidates to a node, used by the cheap delete repair.</summary>
     private int[] SelectClosest(HnswNode query, IReadOnlyList<int> candidates, int layer, int limit, HnswGraphView view)
     {
-        var scorer = new QueryScorer(this, query.Vector, query.Bits);
+        var scorer = new QueryScorer(this, query.Vector.Floats, query.Bits is null ? default : query.Bits.Bits);
         var scored = new List<(float Score, int Id)>(candidates.Count);
         for (int i = 0; i < candidates.Count; i++)
         {
@@ -971,11 +978,11 @@ public sealed class HnswIndex
                 Span<byte> code = _codes!.AsSpan(id * _codeLength, _codeLength);
                 if (_distance == Distance.Hamming)
                 {
-                    quantizer.EncodePacked(node.Bits!, code);
+                    quantizer.EncodePacked(node.Bits!.Bits, code);
                 }
                 else
                 {
-                    quantizer.Encode(node.Vector, code);
+                    quantizer.Encode(node.Vector.Floats, code);
                 }
             }
 
@@ -1477,22 +1484,22 @@ public sealed class HnswIndex
     private float ScoreQueryNode(ReadOnlySpan<float> query, ReadOnlySpan<ulong> packed, HnswNode node) => _distance switch
     {
         Distance.Cosine => _normalize
-            ? 1f - VectorKernels.Dot(query, node.Vector)
-            : VectorKernels.Cosine(query, node.Vector),
-        Distance.DotProduct => VectorKernels.Dot(query, node.Vector),
-        Distance.Euclidean => VectorKernels.EuclideanSquared(query, node.Vector),
-        Distance.Hamming => BitKernels.Hamming(packed!, node.Bits!),
+            ? 1f - VectorKernels.Dot(query, node.Vector.Floats)
+            : VectorKernels.Cosine(query, node.Vector.Floats),
+        Distance.DotProduct => VectorKernels.Dot(query, node.Vector.Floats),
+        Distance.Euclidean => VectorKernels.EuclideanSquared(query, node.Vector.Floats),
+        Distance.Hamming => BitKernels.Hamming(packed!, node.Bits!.Bits),
         _ => throw new InvalidOperationException($"Unknown distance metric '{_distance}'."),
     };
 
     private float ScoreNodeToNode(HnswNode a, HnswNode b) => _distance switch
     {
         Distance.Cosine => _normalize
-            ? 1f - VectorKernels.Dot(a.Vector, b.Vector)
-            : VectorKernels.Cosine(a.Vector, b.Vector),
-        Distance.DotProduct => VectorKernels.Dot(a.Vector, b.Vector),
-        Distance.Euclidean => VectorKernels.EuclideanSquared(a.Vector, b.Vector),
-        Distance.Hamming => BitKernels.Hamming(a.Bits!, b.Bits!),
+            ? 1f - VectorKernels.Dot(a.Vector.Floats, b.Vector.Floats)
+            : VectorKernels.Cosine(a.Vector.Floats, b.Vector.Floats),
+        Distance.DotProduct => VectorKernels.Dot(a.Vector.Floats, b.Vector.Floats),
+        Distance.Euclidean => VectorKernels.EuclideanSquared(a.Vector.Floats, b.Vector.Floats),
+        Distance.Hamming => BitKernels.Hamming(a.Bits!.Bits, b.Bits!.Bits),
         _ => throw new InvalidOperationException($"Unknown distance metric '{_distance}'."),
     };
 
@@ -1537,6 +1544,299 @@ public sealed class HnswIndex
         {
             return new HnswGraphView(_nodes, _count, _entryPointId, _maxLevel);
         }
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Persistence support
+    // -------------------------------------------------------------------------------------
+
+    /// <summary>Whether the given id refers to a live (non-tombstoned) node.</summary>
+    internal bool IsAlive(int id)
+    {
+        HnswGraphView view = CaptureView();
+        return (uint)id < (uint)view.Count && view.Nodes[id] is { Deleted: false };
+    }
+
+    /// <summary>Whether any stored vector currently comes from a memory-mapped checkpoint page.</summary>
+    internal bool UsesMappedVectors
+    {
+        get
+        {
+            HnswGraphView view = CaptureView();
+            for (int id = 0; id < view.Count; id++)
+            {
+                HnswNode? node = view.Nodes[id];
+                if (node is null)
+                {
+                    continue;
+                }
+
+                if (node.Vector.IsMapped || (node.Bits is { IsMapped: true }))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>Captures one node's stored vector and topology for a WAL record or checkpoint page.</summary>
+    internal PersistedNode ExportNode(int id)
+    {
+        HnswGraphView view = CaptureView();
+        if ((uint)id >= (uint)view.Count || view.Nodes[id] is not { } node)
+        {
+            throw new ArgumentOutOfRangeException(nameof(id), "unknown vector id");
+        }
+
+        byte[] vector = _distance == Distance.Hamming
+            ? MemoryMarshal.AsBytes(node.Bits!.Bits).ToArray()
+            : MemoryMarshal.AsBytes(node.Vector.Floats).ToArray();
+        return new PersistedNode(
+            id, node.Level, node.Deleted, vector,
+            CloneTopology(node.Neighbors, node.Level),
+            CloneTopology(node.Backbone, node.Level));
+    }
+
+    /// <summary>
+    /// Replaces the whole index with a checkpoint/WAL snapshot. Vectors whose ids appear in
+    /// <paramref name="vectorOffsets"/> are read directly from <paramref name="region"/>; all other
+    /// nodes keep their own arrays.
+    /// </summary>
+    internal void Restore(
+        IReadOnlyList<PersistedNode> nodes,
+        MappedVectorRegion? region,
+        IReadOnlyDictionary<int, long>? vectorOffsets)
+    {
+        lock (_deleteLock)
+        {
+            lock (_stateLock)
+            {
+                int maxId = -1;
+                foreach (PersistedNode node in nodes)
+                {
+                    maxId = Math.Max(maxId, node.Id);
+                }
+
+                EnsureCapacity(maxId + 1);
+                lock (_quantLock)
+                {
+                    _trainingSample.Clear();
+                }
+
+                var restored = new HnswNode?[_nodes.Length];
+                int live = 0;
+                int maxLevel = -1;
+                int entry = -1;
+                int count = maxId + 1;
+
+                foreach (PersistedNode node in nodes)
+                {
+                    int level = Math.Clamp(node.Level, 0, MaxSupportedLevel);
+                    VectorData vector;
+                    VectorData? bits = null;
+                    bool mapped = region is not null && vectorOffsets is not null &&
+                                  vectorOffsets.TryGetValue(node.Id, out _);
+                    long offset = mapped ? vectorOffsets![node.Id] : 0;
+
+                    if (_distance == Distance.Hamming)
+                    {
+                        int words = _wordsPerVector;
+                        if (node.Vector.Length != words * sizeof(ulong))
+                        {
+                            throw new InvalidDataException($"node {node.Id} has an invalid Hamming vector length");
+                        }
+
+                        bits = mapped && region is not null
+                            ? VectorData.MappedBits(region, offset, words)
+                            : VectorData.FromBits(MemoryMarshal.Cast<byte, ulong>(node.Vector).ToArray());
+                        vector = VectorData.Empty;
+                    }
+                    else
+                    {
+                        if (node.Vector.Length != _dimensions * sizeof(float))
+                        {
+                            throw new InvalidDataException($"node {node.Id} has an invalid vector length");
+                        }
+
+                        vector = mapped && region is not null
+                            ? VectorData.MappedFloats(region, offset, _dimensions)
+                            : VectorData.FromFloats(MemoryMarshal.Cast<byte, float>(node.Vector).ToArray());
+                    }
+
+                    int[][] neighbors = NormalizeTopology(node.Neighbors, level, count);
+                    int[][] backbone = NormalizeTopology(node.Backbone, level, count);
+                    var restoredNode = new HnswNode(node.Id, level, vector, bits, level)
+                    {
+                        Deleted = node.Deleted,
+                    };
+                    restoredNode.SetTopology(neighbors, backbone);
+                    restored[node.Id] = restoredNode;
+
+                    if (!node.Deleted)
+                    {
+                        live++;
+                    }
+
+                    if (level > maxLevel)
+                    {
+                        maxLevel = level;
+                        entry = node.Id;
+                    }
+
+                    if (_quantization is not null)
+                    {
+                        lock (_quantLock)
+                        {
+                            Quantizer? quantizer = Volatile.Read(ref _quantizer);
+                            if (quantizer is null)
+                            {
+                                if (_trainingSample.Count < QuantizationRuntime.TrainingSampleSize)
+                                {
+                                    _trainingSample.Add(TrainingVector(node));
+                                }
+                            }
+                            else if (_distance == Distance.Hamming)
+                            {
+                                quantizer.EncodePacked(bits!.Bits, _codes!.AsSpan(node.Id * _codeLength, _codeLength));
+                            }
+                            else
+                            {
+                                quantizer.Encode(vector.Floats, _codes!.AsSpan(node.Id * _codeLength, _codeLength));
+                            }
+                        }
+                    }
+                }
+
+                _nodes = restored;
+                _count = count;
+                _entryPointId = entry;
+                _maxLevel = maxLevel;
+                Volatile.Write(ref _liveCount, live);
+            }
+
+            // Stored adjacency pages are validated and kept for the file-format contract, but a
+            // WAL snapshot only records one node's links at insert time: reciprocal links added
+            // to older nodes are not part of that record. Rebuilding from the stored vectors and
+            // levels guarantees the restored graph is fully connected and free of tombstones.
+            Compact();
+        }
+    }
+
+    /// <summary>Updates a vector in place, preserving its id and graph topology.</summary>
+    internal bool Replace(int id, ReadOnlySpan<float> vector)
+    {
+        ValidateVector(vector);
+        HnswGraphView view = CaptureView();
+        if ((uint)id >= (uint)view.Count || view.Nodes[id] is not { } node)
+        {
+            return false;
+        }
+
+        VectorData stored;
+        VectorData? bits = null;
+        if (_distance == Distance.Hamming)
+        {
+            var packed = new ulong[_wordsPerVector];
+            BitVectors.PackSignBits(vector, packed);
+            bits = VectorData.FromBits(packed);
+            stored = VectorData.Empty;
+        }
+        else
+        {
+            var values = new float[_dimensions];
+            if (_normalize)
+            {
+                Distances.CopyNormalized(vector, values);
+            }
+            else
+            {
+                vector.CopyTo(values);
+            }
+
+            stored = VectorData.FromFloats(values);
+        }
+
+        node.SetVector(stored, bits);
+        if (_quantization is not null)
+        {
+            lock (_quantLock)
+            {
+                Quantizer? quantizer = Volatile.Read(ref _quantizer);
+                if (quantizer is null)
+                {
+                    if (_trainingSample.Count < QuantizationRuntime.TrainingSampleSize)
+                    {
+                        _trainingSample.Add(_distance == Distance.Hamming ? vector.ToArray() : stored.Floats.ToArray());
+                    }
+                }
+                else if (_distance == Distance.Hamming)
+                {
+                    quantizer.EncodePacked(bits!.Bits, _codes!.AsSpan(id * _codeLength, _codeLength));
+                }
+                else
+                {
+                    quantizer.Encode(stored.Floats, _codes!.AsSpan(id * _codeLength, _codeLength));
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Rebinds all mapped vector slices after a checkpoint replaces the backing file.</summary>
+    internal void RebindMappedVectors(MappedVectorRegion region)
+    {
+        HnswGraphView view = CaptureView();
+        for (int id = 0; id < view.Count; id++)
+        {
+            view.Nodes[id]?.Rebind(region);
+        }
+    }
+
+    private float[] TrainingVector(PersistedNode node)
+    {
+        if (_distance != Distance.Hamming)
+        {
+            return MemoryMarshal.Cast<byte, float>(node.Vector).ToArray();
+        }
+
+        var values = new float[_dimensions];
+        BitVectors.UnpackSignBits(MemoryMarshal.Cast<byte, ulong>(node.Vector), _dimensions, values);
+        return values;
+    }
+
+    private int[][] CloneTopology(int[][] source, int level)
+    {
+        var copy = new int[level + 1][];
+        for (int i = 0; i <= level; i++)
+        {
+            copy[i] = i < source.Length ? (int[])source[i].Clone() : [];
+        }
+
+        return copy;
+    }
+
+    private static int[][] NormalizeTopology(int[][] source, int level, int count)
+    {
+        var result = new int[level + 1][];
+        for (int i = 0; i <= level; i++)
+        {
+            int[] links = i < source.Length ? source[i] : [];
+            var valid = new List<int>(links.Length);
+            foreach (int id in links)
+            {
+                if ((uint)id < (uint)count && !valid.Contains(id))
+                {
+                    valid.Add(id);
+                }
+            }
+
+            result[i] = valid.ToArray();
+        }
+
+        return result;
     }
 
     // -------------------------------------------------------------------------------------

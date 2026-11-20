@@ -18,4 +18,10 @@
     <Compile Include="..\Shared\FloatAssertions.cs" Link="Shared\FloatAssertions.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Zero-allocation tests measure ArrayPool-backed search paths; serial collections keep
+         those measurements deterministic when other tests drain the shared pool. -->
+    <None Update="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

@@ -9,8 +9,8 @@ namespace Faro;
 /// </remarks>
 public sealed class HnswOptions
 {
-    /// <summary>Number of dimensions of every vector. Required, must be positive.</summary>
-    public required int Dimensions { get; set; }
+    /// <summary>Number of dimensions of every vector. Must be positive; a database collection sets it from its own options.</summary>
+    public int Dimensions { get; set; }
 
     /// <summary>The distance metric used to compare vectors. Defaults to <see cref="Distance.Cosine"/>.</summary>
     public Distance Distance { get; set; } = Distance.Cosine;

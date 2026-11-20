@@ -6,7 +6,7 @@ namespace Faro;
 /// <summary>
 /// Optional tuning for a <see cref="FaroCollection{T}"/>.
 /// </summary>
-public sealed class CollectionOptions
+public class CollectionOptions
 {
     /// <summary>Custom selectivity planner. Defaults to <see cref="SearchPlanner"/> with its standard settings.</summary>
     public SearchPlanner? Planner { get; set; }

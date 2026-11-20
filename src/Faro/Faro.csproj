@@ -4,6 +4,7 @@
     <Description>Faro core &#8212; embedded, zero-server vector database for .NET: SIMD distances, exact and HNSW indexes, pooled search data structures.</Description>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <IsPackable>true</IsPackable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>

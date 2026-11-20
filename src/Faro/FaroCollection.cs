@@ -129,6 +129,9 @@ public sealed class FaroCollection<T>
     /// <summary>The tokenizer used for the full-text field and hybrid queries.</summary>
     public Tokenizer Tokenizer => _tokenizer;
 
+    /// <summary>Name of the declared full-text field, when the schema has one.</summary>
+    internal string? FullTextFieldName => _payloads.FullTextFieldName;
+
     /// <summary>The planner decision made by the most recent search.</summary>
     public SearchDecision LastDecision { get; private set; }
 
@@ -141,10 +144,23 @@ public sealed class FaroCollection<T>
         ArgumentNullException.ThrowIfNull(payload);
         // Serialize before touching the graph: a serializer failure must not leave an orphan
         // vector with no payload behind.
-        byte[] serialized = _payloads.Serialize(payload);
+        return AddCore(vector, payload, _payloads.Serialize(payload));
+    }
+
+    /// <summary>Adds a vector using payload bytes that have already been serialized.</summary>
+    internal int AddCore(ReadOnlySpan<float> vector, T payload, byte[] serialized)
+    {
         int id = _index.Add(vector);
         _payloads.Upsert(id, payload, serialized);
         return id;
+    }
+
+    /// <summary>Replaces the payload of an existing id without touching its vector or graph links.</summary>
+    internal void ReplacePayload(int id, T payload, byte[] serialized)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        ArgumentNullException.ThrowIfNull(serialized);
+        _payloads.Upsert(id, payload, serialized);
     }
 
     /// <summary>Removes a vector and all its payload/text index entries.</summary>

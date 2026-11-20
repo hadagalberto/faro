@@ -4,9 +4,9 @@
 
 | Layer | Project | Status | Responsibility |
 | --- | --- | --- | --- |
-| Core | `src/Faro` | Milestone 4 | Metrics, storage, exact + HNSW indexes, quantization, payload schema/indexes, filters, planner, BM25 hybrid search, pooled search structures |
+| Core | `src/Faro` | Milestone 5 | Metrics, exact + HNSW indexes, quantization, payload schema/indexes, filters, planner, BM25 hybrid search, versioned single-file persistence with WAL and memory-mapped vector reads |
 | Connector | `src/Faro.VectorData` | planned | `Microsoft.Extensions.VectorData` record definitions, LINQ filter translation, hybrid search adapter |
-| Quality gates | `tests/Faro.Tests`, `tests/Faro.RecallTests` | Milestone 4 | Equivalence, invariants, concurrency, allocations, recall (quantized and filtered) |
+| Quality gates | `tests/Faro.Tests`, `tests/Faro.RecallTests` | Milestone 5 | Equivalence, invariants, concurrency, allocations, recall (quantized and filtered), file-format round-trips and torn-WAL crash simulation |
 | Tooling | `benchmarks/Faro.Benchmarks`, `samples/Faro.Samples.Rag` | Milestone 1 | Throughput/latency measurement and an offline end-to-end sample |
 
 The core is intentionally dependency-free (only `System.Numerics.Tensors` is allowed by SPEC, and it is not needed yet). This keeps Native AOT and trimming predictable.
@@ -63,9 +63,12 @@ An index with `Quantization` stores codes alongside full vectors. The first pass
 
 `Tokenizer` uses FormD decomposition and drops non-spacing marks to fold accents, lowercases with `char.ToLowerInvariant`, splits on non-letter/digit runes and removes pluggable en/pt stopwords. `Bm25Index` keeps term -> (doc -> tf) postings and document lengths; scores use Robertson/Zaragoza idf and tf saturation. `Fusion` merges vector and BM25 rankings with RRF (`1/(k+rank)`) or min-max normalized weighted scores, with ascending id as the final tie-break.
 
+## Persistence (milestone 5)
+
+`FaroDb` owns a serializer-independent `DatabaseState` that mirrors every committed collection, node and payload. Writes append a self-contained WAL record (CRC32C, Castagnoli), update the in-memory indexes and update that state. Opening reads the checkpoint, validates every page checksum, replays the WAL and truncates a torn tail. Checkpoints write a new file to `<path>.tmp`, flush, atomically rename it, reset the WAL and rebind the memory map. Stored vectors are read directly from the mapped page; vectors added since the last checkpoint use owned arrays. The in-memory graph is rebuilt from vectors and levels on open, because a WAL upsert cannot carry reciprocal link changes made to older nodes. Keys (`int`, `long`, `Guid`, `string`) are encoded independently of the payload serializer. See [file-format.md](file-format.md) for byte-level details.
+
 ## Roadmap (remaining design intent)
 
-5. **Persistence** — versioned single-file format with WAL (CRC32C, Castagnoli), configurable fsync, torn-tail recovery, checkpoint via temp file + atomic rename. See [file-format.md](file-format.md).
 6. **Connector** — `Faro.VectorData` implements the current abstractions, translating the supported LINQ filter subset onto `Filter` and exposing hybrid search.
 
 ## References

@@ -4,9 +4,9 @@
 
 | Layer | Project | Status | Responsibility |
 | --- | --- | --- | --- |
-| Core | `src/Faro` | Milestone 3 | Metrics, storage, exact + HNSW indexes, quantization, pooled search structures |
+| Core | `src/Faro` | Milestone 4 | Metrics, storage, exact + HNSW indexes, quantization, payload schema/indexes, filters, planner, BM25 hybrid search, pooled search structures |
 | Connector | `src/Faro.VectorData` | planned | `Microsoft.Extensions.VectorData` record definitions, LINQ filter translation, hybrid search adapter |
-| Quality gates | `tests/Faro.Tests`, `tests/Faro.RecallTests` | Milestone 3 | Equivalence, invariants, concurrency, allocations, recall (including quantized recall) |
+| Quality gates | `tests/Faro.Tests`, `tests/Faro.RecallTests` | Milestone 4 | Equivalence, invariants, concurrency, allocations, recall (quantized and filtered) |
 | Tooling | `benchmarks/Faro.Benchmarks`, `samples/Faro.Samples.Rag` | Milestone 1 | Throughput/latency measurement and an offline end-to-end sample |
 
 The core is intentionally dependency-free (only `System.Numerics.Tensors` is allowed by SPEC, and it is not needed yet). This keeps Native AOT and trimming predictable.
@@ -55,12 +55,18 @@ Topology snapshots are captured under a short state lock; distance work and neig
 
 An index with `Quantization` stores codes alongside full vectors. The first pass scores codes and keeps `k * rescore` candidates; the second pass scores those with the exact SIMD kernels and keeps `k`, so returned scores are full precision. HNSW construction never uses codes — quantization only replaces the routing scorer during search, with the beam widened to the oversampling window. A pretrained codec makes builds reproducible; otherwise training happens once on first search from the first vectors added.
 
-## Roadmap (design intent, not yet implemented)
+## Payloads, filters and hybrid search (milestone 4)
 
-3. **Filtering** — immutable composable filters over indexed payload fields; selectivity planner chooses exact scan over candidates vs filtered graph traversal.
-4. **Hybrid** — Unicode-normalized/accent-folded tokenizer, BM25 inverted index (Robertson & Zaragoza), RRF fusion (Cormack et al. 2009).
+`PayloadSchema<T>` declares keyword, numeric, bool, tag and one full-text field with delegate selectors. `SourceGenPayloadSerializer<T>` stores payloads with a caller-supplied `JsonTypeInfo<T>` obtained from a `JsonSerializerContext`, so no reflection is used. Each non-text field has an inverted index (`TermIndex`, `NumericIndex`, `BoolIndex`); all share the vector index's integer ids and are updated atomically with the payload record.
+
+`Filter` is an immutable tree. `Evaluate` over the index snapshot yields the exact candidate id set (set intersection for `&`, union for `|`, complement for `!`), while `Matches` evaluates the same tree against one stored payload during traversal. `SearchPlanner` compares candidate fraction to `ExactThreshold`: at or below it the candidates are scored exactly with the same SIMD kernels as the indexes; above it the HNSW layer-0 search applies the predicate at visit time, seeds the beam with indexed ids, and widens `ef` to `min(MaxEf, ceil(baseEf / selectivity))`. Upper layers are unfiltered and only choose an entry point.
+
+`Tokenizer` uses FormD decomposition and drops non-spacing marks to fold accents, lowercases with `char.ToLowerInvariant`, splits on non-letter/digit runes and removes pluggable en/pt stopwords. `Bm25Index` keeps term -> (doc -> tf) postings and document lengths; scores use Robertson/Zaragoza idf and tf saturation. `Fusion` merges vector and BM25 rankings with RRF (`1/(k+rank)`) or min-max normalized weighted scores, with ascending id as the final tie-break.
+
+## Roadmap (remaining design intent)
+
 5. **Persistence** — versioned single-file format with WAL (CRC32C, Castagnoli), configurable fsync, torn-tail recovery, checkpoint via temp file + atomic rename. See [file-format.md](file-format.md).
-6. **Connector** — `Faro.VectorData` implements the current abstractions with source-generated payload serialization for AOT safety.
+6. **Connector** — `Faro.VectorData` implements the current abstractions, translating the supported LINQ filter subset onto `Filter` and exposing hybrid search.
 
 ## References
 

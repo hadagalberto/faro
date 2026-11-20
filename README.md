@@ -2,7 +2,7 @@
 
 **Faro** is an embedded, zero-server vector database for .NET — "SQLite for embeddings". One NuGet package, one file on disk, SIMD distance kernels, exact and approximate indexes, and a path into Semantic Kernel / Microsoft.Extensions.AI RAG pipelines. MIT licensed, targets `net8.0` and `net10.0`, and is built to be Native AOT and trimming compatible.
 
-> **Status — Milestone 3:** on top of the exact `FlatIndex` and the `HnswIndex` (Algorithm 4, deterministic builds, concurrent inserts, tombstone deletes and `Compact()`), collections can now quantize vectors — symmetric int8 with quantile clipping and binary sign codes — and use oversampling plus full-precision rescoring. Recall gates measure `int8 + rescore(4) ≥ 0.95` and `binary + rescore(8) ≥ 0.85` on 768-d normalized data against Flat ground truth. Filtering, BM25 hybrid search, WAL persistence and the VectorData connector are designed but not shipped yet; see [docs/architecture.md](docs/architecture.md).
+> **Status — Milestone 4:** on top of exact/HNSW indexes and quantization with rescoring, `FaroCollection<T>` now stores typed payloads via source-generated System.Text.JSON metadata, indexes keyword/numeric/bool/tag fields, composes immutable filters, plans selective searches (exact over candidates vs adaptive filtered HNSW traversal), and fuses vector + BM25 rankings with RRF or weighted scores. Recall gates cover `int8`/`binary` rescoring and filtered recall ≥ 0.9 at 1% selectivity. WAL persistence and the VectorData connector are designed but not shipped yet; see [docs/architecture.md](docs/architecture.md).
 
 ## Why Faro
 
@@ -15,8 +15,8 @@ Most .NET HNSW packages hand you a bare index. Faro aims at the complete databas
 | Pooled heaps / visited sets (no per-search allocations) | ✅ | — |
 | HNSW with deterministic builds, concurrent inserts and neighbour repair | ✅ | ✅ |
 | Scalar int8 / binary quantization with quantile clipping and rescoring | ✅ | — |
-| Payload filters with selectivity-aware planning | planned | — |
-| BM25 full-text + RRF hybrid search | planned | — |
+| Payload filters with selectivity-aware planning | ✅ | — |
+| BM25 full-text + RRF hybrid search | ✅ | — |
 | Single-file persistence with WAL + recovery | planned | — |
 | Microsoft.Extensions.VectorData connector | planned | — |
 
@@ -100,6 +100,46 @@ var binary = new FlatIndex(new FlatOptions
 ```
 
 `ScalarQuantizer` trains per-dimension `min`/`max` (or quantile-clipped bounds) and encodes one signed byte per dimension; int8 distances use `Vector512/256/128` integer kernels. `BinaryQuantizer` packs signs 64 per word and uses popcount Hamming. Graph construction always uses full precision; quantization only steers search traversal. Measured recall is in `tests/Faro.RecallTests/QuantizationRecallTests.cs`.
+
+## Payloads, filtering and hybrid search
+
+`FaroCollection<T>` binds a vector index to typed payloads. Serialization uses a caller-supplied source-generated `JsonTypeInfo<T>` (no reflection, AOT-safe); field selectors are delegates, so no member names are discovered at runtime.
+
+```csharp
+using Faro;
+using Faro.Filtering;
+using Faro.Hybrid;
+using Faro.Payload;
+using System.Text.Json.Serialization;
+
+[JsonSerializable(typeof(Doc))]
+internal sealed partial class DocContext : JsonSerializerContext { }
+
+var schema = new PayloadSchema<Doc>()
+    .Keyword("tenant", d => d.Tenant)
+    .Numeric("year", d => d.Year)
+    .Bool("active", d => d.Active)
+    .Tags("tags", d => d.Tags)
+    .FullText("text", d => d.Text); // feeds the BM25 index
+
+var docs = new FaroCollection<Doc>(
+    schema,
+    new SourceGenPayloadSerializer<Doc>(DocContext.Default.Doc),
+    new HnswOptions { Dimensions = 768, Distance = Distance.Cosine });
+
+int id = docs.Add(embedding, doc);
+docs.TryGetPayload(id, out Doc? stored);
+
+Filter filter = (Filter.Eq("tenant", "acme") & Filter.Range("year", 2020, 2024))
+                | Filter.In("tags", "ai", "rag");
+SearchResult[] hits = docs.Search(queryEmbedding, k: 10, filter: filter);
+SearchDecision decision = docs.LastDecision; // ExactCandidates or FilteredTraversal
+
+HybridResult[] hybrid = docs.HybridSearch(
+    queryEmbedding, "ação", k: 10, fusion: Fusion.Rrf(60));
+```
+
+Filters are immutable and composable with `&`, `|` and `!`. The planner estimates selectivity from the payload indexes: a filter matching few vectors is scored exactly over its candidate ids; a broad filter traverses the HNSW graph with the predicate applied during traversal and an adaptive beam (`baseEf / selectivity`, capped). BM25 tokenization normalizes Unicode, folds accents ("ação" matches "acao") and removes English/Portuguese stopwords. Fusion is reciprocal rank fusion (Cormack et al., 2009) or min-max normalized weighted score fusion.
 
 ## Distances
 

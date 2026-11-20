@@ -158,6 +158,12 @@ public sealed class HnswIndex
     /// <summary>The distance metric of this index.</summary>
     public Distance Distance => _distance;
 
+    /// <summary>Whether vectors are normalized on insertion (relevant for cosine scoring).</summary>
+    internal bool NormalizesOnAdd => _normalize;
+
+    /// <summary>The configured default search beam.</summary>
+    internal int DefaultEfSearch => _efSearch;
+
     /// <summary>Highest layer currently present in the graph (-1 when empty).</summary>
     public int MaxLevel
     {
@@ -1109,6 +1115,329 @@ public sealed class HnswIndex
 
             ArrayPool<int>.Shared.Return(candidates);
         }
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Filtered search
+    // -------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Searches the graph for the <paramref name="k"/> nearest vectors that satisfy
+    /// <paramref name="isMatch"/>, using the configured beam width.
+    /// </summary>
+    /// <param name="query">The query vector.</param>
+    /// <param name="k">Maximum number of hits.</param>
+    /// <param name="isMatch">Predicate evaluated on internal ids during traversal.</param>
+    /// <param name="efSearch">Beam width; at least <paramref name="k"/> is used.</param>
+    /// <returns>Best-first hits in a freshly allocated array.</returns>
+    public SearchResult[] SearchFiltered(
+        ReadOnlySpan<float> query,
+        int k,
+        Func<int, bool> isMatch,
+        int efSearch) =>
+        SearchFiltered(query, k, isMatch, efSearch, null);
+
+    /// <summary>
+    /// Searches the graph for matching vectors, seeding the beam with ids from the payload index
+    /// so sparse filters still reach their matching regions.
+    /// </summary>
+    /// <param name="query">The query vector.</param>
+    /// <param name="k">Maximum number of hits.</param>
+    /// <param name="isMatch">Predicate evaluated on internal ids during traversal.</param>
+    /// <param name="efSearch">Beam width; at least <paramref name="k"/> is used.</param>
+    /// <param name="seedIds">
+    /// Ids known to satisfy the filter from the payload indexes. They are inserted into the beam
+    /// (at most <paramref name="efSearch"/> of them) to jump directly into matching regions.
+    /// </param>
+    /// <returns>Best-first hits in a freshly allocated array.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="isMatch"/> is <see langword="null"/>.</exception>
+    public SearchResult[] SearchFiltered(
+        ReadOnlySpan<float> query,
+        int k,
+        Func<int, bool> isMatch,
+        int efSearch,
+        IReadOnlyCollection<int>? seedIds)
+    {
+        ArgumentNullException.ThrowIfNull(isMatch);
+        ValidateEf(efSearch);
+        int capacity = EstimateResultCapacity(k);
+        if (capacity == 0)
+        {
+            return [];
+        }
+
+        var results = new SearchResult[capacity];
+        int written = SearchFilteredCore(query, k, results, efSearch, isMatch, seedIds);
+        return written == results.Length ? results : results.AsSpan(0, written).ToArray();
+    }
+
+    private int SearchFilteredCore(
+        ReadOnlySpan<float> query,
+        int k,
+        Span<SearchResult> results,
+        int efSearch,
+        Func<int, bool> isMatch,
+        IReadOnlyCollection<int>? seedIds)
+    {
+        ValidateQuery(query);
+        ValidateK(k);
+
+        HnswGraphView view = CaptureView();
+        if (view.EntryPointId < 0 || view.Count == 0 || results.Length == 0)
+        {
+            return 0;
+        }
+
+        int limit = Math.Min(k, results.Length);
+        int beam = Math.Max(efSearch, limit);
+        bool quantized = false;
+        if (_quantization is not null)
+        {
+            EnsureQuantized();
+            quantized = Volatile.Read(ref _quantizer) is not null;
+            if (quantized)
+            {
+                beam = Math.Max(beam, (int)Math.Min(view.Count, (long)limit * _quantization.RescoreFactor));
+            }
+        }
+
+        float[]? normalized = null;
+        ReadOnlySpan<float> effective = query;
+        ulong[]? packed = null;
+        if (_normalize)
+        {
+            normalized = ArrayPool<float>.Shared.Rent(_dimensions);
+            Distances.CopyNormalized(query, normalized.AsSpan(0, _dimensions));
+            effective = normalized.AsSpan(0, _dimensions);
+        }
+
+        if (_distance == Distance.Hamming)
+        {
+            packed = ArrayPool<ulong>.Shared.Rent(_wordsPerVector);
+            BitVectors.PackSignBits(query, packed.AsSpan(0, _wordsPerVector));
+        }
+
+        byte[]? queryCode = null;
+        if (quantized)
+        {
+            queryCode = ArrayPool<byte>.Shared.Rent(_codeLength);
+            Span<byte> querySpan = queryCode.AsSpan(0, _codeLength);
+            if (_distance == Distance.Hamming)
+            {
+                Volatile.Read(ref _quantizer)!.EncodePacked(packed!.AsSpan(0, _wordsPerVector), querySpan);
+            }
+            else
+            {
+                Volatile.Read(ref _quantizer)!.Encode(effective, querySpan);
+            }
+        }
+
+        int[] candidates = ArrayPool<int>.Shared.Rent(beam);
+        try
+        {
+            ReadOnlySpan<ulong> packedQuery = packed is null ? default : packed.AsSpan(0, _wordsPerVector);
+            QueryScorer scorer;
+            if (quantized)
+            {
+                byte[] codes = _codes!;
+                scorer = new QueryScorer(this, queryCode!.AsSpan(0, _codeLength), codes.AsSpan());
+            }
+            else
+            {
+                scorer = new QueryScorer(this, effective, packedQuery);
+            }
+
+            int entry = view.EntryPointId;
+            int found = 0;
+
+            // Upper layers are traversed without the filter: they only choose a good entry point
+            // for the layer-0 filtered beam, and filtering them could strand the search far from
+            // any matching region.
+            for (int layer = view.MaxLevel; layer > 0; layer--)
+            {
+                found = SearchLayer(view, scorer, entry, beam, layer, candidates);
+                if (found > 0)
+                {
+                    entry = candidates[0];
+                }
+            }
+
+            found = SearchLayerFiltered(view, scorer, entry, beam, candidates, isMatch, seedIds);
+
+            using var resultHeap = DistanceHeap.Rent(Heaps.WorstKept, limit);
+            for (int i = 0; i < found; i++)
+            {
+                int id = candidates[i];
+                if (!isMatch(id))
+                {
+                    continue;
+                }
+
+                HnswNode? node = view.Nodes[id];
+                if (node is null || node.Deleted)
+                {
+                    continue;
+                }
+
+                float score = quantized
+                    ? ScoreQueryNode(effective, packedQuery, node)
+                    : scorer.Score(node);
+                resultHeap.PushBounded(limit, score, id);
+            }
+
+            int written = resultHeap.Count;
+            int index = written;
+            while (resultHeap.TryPop(out float score, out int id))
+            {
+                results[--index] = new SearchResult(id, score);
+            }
+
+            return written;
+        }
+        finally
+        {
+            if (normalized is not null)
+            {
+                ArrayPool<float>.Shared.Return(normalized);
+            }
+
+            if (packed is not null)
+            {
+                ArrayPool<ulong>.Shared.Return(packed);
+            }
+
+            if (queryCode is not null)
+            {
+                ArrayPool<byte>.Shared.Return(queryCode);
+            }
+
+            ArrayPool<int>.Shared.Return(candidates);
+        }
+    }
+
+    /// <summary>
+    /// Algorithm 5 restricted to layer 0 by a predicate. Non-matching nodes can still be visited
+    /// (they are pushed to the exploration heap but never kept as results), which lets the beam
+    /// walk through filtered-out regions to reach matching ones.
+    /// </summary>
+    private int SearchLayerFiltered(
+        HnswGraphView view,
+        QueryScorer scorer,
+        int entryId,
+        int ef,
+        Span<int> destination,
+        Func<int, bool> isMatch,
+        IReadOnlyCollection<int>? seedIds)
+    {
+        (HeapOrder bestFirst, HeapOrder worstKept) = Heaps;
+        using var candidates = DistanceHeap.Rent(bestFirst, ef);
+        using var top = DistanceHeap.Rent(worstKept, ef);
+        using var visited = VisitedSet.Rent(Math.Max(view.Count, 1));
+
+        if (seedIds is not null)
+        {
+            int seeded = 0;
+            foreach (int id in seedIds)
+            {
+                if (seeded >= ef)
+                {
+                    break;
+                }
+
+                if ((uint)id >= (uint)view.Count || !visited.Add(id))
+                {
+                    continue;
+                }
+
+                HnswNode? seed = view.Nodes[id];
+                if (seed is null || seed.Deleted || !isMatch(id))
+                {
+                    continue;
+                }
+
+                float seedScore = scorer.Score(seed);
+                candidates.Push(seedScore, id);
+                top.PushBounded(ef, seedScore, id);
+                seeded++;
+            }
+        }
+
+        float worstScore = 0;
+        bool hasWorst = top.TryPeekRoot(out worstScore, out _);
+        if ((uint)entryId < (uint)view.Count && visited.Add(entryId))
+        {
+            HnswNode? entry = view.Nodes[entryId];
+            if (entry is not null)
+            {
+                float entryScore = scorer.Score(entry);
+                candidates.Push(entryScore, entryId);
+                if (isMatch(entryId))
+                {
+                    top.PushBounded(ef, entryScore, entryId);
+                    hasWorst = top.TryPeekRoot(out worstScore, out _);
+                }
+            }
+        }
+
+        while (candidates.Count > 0)
+        {
+            candidates.TryPeekRoot(out float candidateScore, out _);
+            if (hasWorst && top.Count == ef && !Closer(candidateScore, worstScore))
+            {
+                break;
+            }
+
+            candidates.TryPop(out candidateScore, out int currentId);
+            HnswNode? current = view.Nodes[currentId];
+            if (current is null)
+            {
+                continue;
+            }
+
+            for (int source = 0; source < 2; source++)
+            {
+                int[] adjacent = source == 0 ? current.GetLinks(0) : current.GetBackbone(0);
+                for (int i = 0; i < adjacent.Length; i++)
+                {
+                    int id = adjacent[i];
+                    if ((uint)id >= (uint)view.Count || !visited.Add(id))
+                    {
+                        continue;
+                    }
+
+                    HnswNode? neighbor = view.Nodes[id];
+                    if (neighbor is null || neighbor.Deleted)
+                    {
+                        continue;
+                    }
+
+                    float score = scorer.Score(neighbor);
+                    if (isMatch(id))
+                    {
+                        if (!hasWorst || top.Count < ef || Closer(score, worstScore))
+                        {
+                            candidates.Push(score, id);
+                            top.PushBounded(ef, score, id);
+                            hasWorst = top.TryPeekRoot(out worstScore, out _);
+                        }
+                    }
+                    else if (!hasWorst || Closer(score, worstScore))
+                    {
+                        // Filtered node: traverse it but never keep it as a hit.
+                        candidates.Push(score, id);
+                    }
+                }
+            }
+        }
+
+        int count = top.Count;
+        int index = count;
+        while (top.TryPop(out _, out int id))
+        {
+            destination[--index] = id;
+        }
+
+        return count;
     }
 
     private int EstimateResultCapacity(int k)

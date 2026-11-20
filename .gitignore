@@ -6,3 +6,4 @@ TestResults/
 BenchmarkDotNet.Artifacts/
 *.faro
 *.faro-wal
+opencode.json

@@ -480,7 +480,9 @@ public class FlatIndexTests
     [Fact]
     public void Add_ReturnsSequentialIds_AndGrowsBeyondInitialCapacity()
     {
-        var index = new FlatIndex(new FlatOptions { Dimensions = Dim, InitialCapacity = 2, ParallelThreshold = int.MaxValue });
+        // Storage/growth is what is under test here: disable cosine normalization so the
+        // retrieved vectors can be compared verbatim with the ones that were added.
+        var index = new FlatIndex(new FlatOptions { Dimensions = Dim, InitialCapacity = 2, NormalizeOnAdd = false, ParallelThreshold = int.MaxValue });
         var stored = new float[Dim];
 
         for (int id = 0; id < 200; id++)

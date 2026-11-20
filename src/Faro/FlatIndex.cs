@@ -271,7 +271,9 @@ public sealed class FlatIndex
         if (_normalize)
         {
             normalizedQuery = ArrayPool<float>.Shared.Rent(_dimensions);
-            Distances.CopyNormalized(query, normalizedQuery);
+            // ArrayPool returns an array at least as large as requested; CopyNormalized requires
+            // an exact-length destination, so slice before handing it over.
+            Distances.CopyNormalized(query, normalizedQuery.AsSpan(0, _dimensions));
             effectiveQuery = normalizedQuery.AsSpan(0, _dimensions);
         }
 
@@ -316,7 +318,7 @@ public sealed class FlatIndex
         var queryBuffer = ArrayPool<float>.Shared.Rent(_dimensions);
         if (_normalize)
         {
-            Distances.CopyNormalized(query, queryBuffer);
+            Distances.CopyNormalized(query, queryBuffer.AsSpan(0, _dimensions));
         }
         else
         {

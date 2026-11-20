@@ -31,7 +31,6 @@ public class FlatConcurrencyTests
         Distances.Normalize(normalizedQuery);
         var errors = new ConcurrentQueue<Exception>();
         var writerDone = new ManualResetEventSlim(false);
-        var stored = new float[32];
         var cancellation = TestContext.Current.CancellationToken;
 
         var writer = Task.Run(() =>
@@ -55,6 +54,8 @@ public class FlatConcurrencyTests
 
         var searchers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
         {
+            // Per-searcher scratch: sharing this buffer would make the score recomputation race.
+            var stored = new float[32];
             try
             {
                 long searches = 0;

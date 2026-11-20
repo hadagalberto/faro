@@ -108,6 +108,7 @@ internal ref struct DistanceHeap
     /// <returns><see langword="true"/> if the item is held by the heap afterwards.</returns>
     public bool PushBounded(int limit, float priority, int id)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         if (_count < limit)
         {
             Push(priority, id);
@@ -124,6 +125,14 @@ internal ref struct DistanceHeap
 
         return false;
     }
+
+    /// <summary>
+    /// Returns whether a candidate ranks strictly above the current root in this heap's total
+    /// order (see <see cref="HeapOrder"/>). An empty heap has no root, so this is always
+    /// <see langword="false"/> for one.
+    /// </summary>
+    public bool IsBetterThanRoot(float priority, int id) =>
+        _count != 0 && IsBetter((priority, id), _items[0]);
 
     /// <summary>Peeks the root without removing it.</summary>
     public bool TryPeekRoot(out float priority, out int id)

@@ -4,19 +4,35 @@ using Xunit;
 
 namespace Faro.Tests.Internal;
 
+/// <summary>
+/// Contract tests for the pooled top-k heap. Every order is a total order on (priority, id);
+/// the heap root is its maximum. <see cref="DistanceHeap.PushBounded"/> therefore keeps the
+/// <c>limit</c> items that are <em>worst</em> under the order (the inverse order's best-k),
+/// which is exactly what index searches need: they rent the inverse of their metric order so
+/// the root is the worst kept hit and evictions are metric-correct even at score ties.
+/// </summary>
 public class DistanceHeapTests
 {
+    // HeapOrder is internal to Faro, so theories pass its integer value and cast inside.
+    public static TheoryData<int> Orders { get; } = new()
+    {
+        (int)HeapOrder.MinIdAscending,
+        (int)HeapOrder.MaxIdAscending,
+        (int)HeapOrder.MaxIdDescending,
+        (int)HeapOrder.MinIdDescending,
+    };
+
     [Fact]
     public void Rent_InvalidCapacity_Throws()
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => DistanceHeap.Rent(HeapOrder.Min, 0));
-        Assert.Throws<ArgumentOutOfRangeException>(() => DistanceHeap.Rent(HeapOrder.Max, -1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => DistanceHeap.Rent(HeapOrder.MinIdAscending, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => DistanceHeap.Rent(HeapOrder.MaxIdAscending, -1));
     }
 
     [Fact]
     public void MinHeap_PopsAscendingPriorities()
     {
-        using var heap = DistanceHeap.Rent(HeapOrder.Min, 8);
+        using var heap = DistanceHeap.Rent(HeapOrder.MinIdAscending, 8);
 
         ulong state = 0x5eed_6001;
         var pushed = new List<(float Priority, int Id)>();
@@ -42,7 +58,7 @@ public class DistanceHeapTests
     [Fact]
     public void MaxHeap_PopsDescendingPriorities()
     {
-        using var heap = DistanceHeap.Rent(HeapOrder.Max, 8);
+        using var heap = DistanceHeap.Rent(HeapOrder.MaxIdAscending, 8);
 
         ulong state = 0x5eed_6002;
         var pushed = new List<(float Priority, int Id)>();
@@ -68,7 +84,7 @@ public class DistanceHeapTests
     [Fact]
     public void MinHeap_Ties_BreakByAscendingId()
     {
-        using var heap = DistanceHeap.Rent(HeapOrder.Min, 8);
+        using var heap = DistanceHeap.Rent(HeapOrder.MinIdAscending, 8);
         heap.Push(5f, 7);
         heap.Push(5f, 2);
         heap.Push(5f, 9);
@@ -88,7 +104,7 @@ public class DistanceHeapTests
     [Fact]
     public void MaxHeap_Ties_BreakByAscendingId()
     {
-        using var heap = DistanceHeap.Rent(HeapOrder.Max, 8);
+        using var heap = DistanceHeap.Rent(HeapOrder.MaxIdAscending, 8);
         heap.Push(5f, 7);
         heap.Push(5f, 2);
         heap.Push(5f, 9);
@@ -104,13 +120,32 @@ public class DistanceHeapTests
         Assert.Equal((5f, 9), (p4, id4));
     }
 
-    [Fact]
-    public void PushBounded_MaxHeap_KeepsSmallestPriorities_EvictingWorstFirst()
+    [Theory]
+    [InlineData((int)HeapOrder.MaxIdDescending)]
+    [InlineData((int)HeapOrder.MinIdDescending)]
+    public void IdDescendingOrders_Ties_BreakByDescendingId(int orderValue)
     {
-        using var heap = DistanceHeap.Rent(HeapOrder.Max, 8);
+        var order = (HeapOrder)orderValue;
+        using var heap = DistanceHeap.Rent(order, 8);
+        foreach (int id in new[] { 7, 2, 9, 1 })
+        {
+            heap.Push(5f, id);
+        }
 
-        // limit 3: the heap keeps the three smallest priorities seen so far; the root is the
-        // worst kept and is the one replaced when something better arrives.
+        foreach (int expectedId in new[] { 9, 7, 2, 1 })
+        {
+            Assert.True(heap.TryPop(out float priority, out int id));
+            Assert.Equal((5f, expectedId), (priority, id));
+        }
+    }
+
+    [Fact]
+    public void PushBounded_MaxIdDescending_KeepsSmallestPriorities_EvictingWorstFirst()
+    {
+        // This is the order FlatIndex rents for lower-is-closer metrics: the root is the
+        // largest priority (the worst kept hit), so a closer candidate replaces it.
+        using var heap = DistanceHeap.Rent(HeapOrder.MaxIdDescending, 8);
+
         Assert.True(heap.PushBounded(3, 10f, 0));
         Assert.True(heap.PushBounded(3, 5f, 1));
         Assert.True(heap.PushBounded(3, 8f, 2));
@@ -123,7 +158,7 @@ public class DistanceHeapTests
         Assert.False(heap.PushBounded(3, 6.5f, 7)); // worse than root 6 -> dropped
         Assert.Equal(3, heap.Count);
 
-        // Remaining: (5,1), (6,5), (3,3); max-heap pops worst first: 6, 5, 3.
+        // Remaining: (5,1), (6,5), (3,3); popped worst-first: 6, 5, 3.
         Assert.True(heap.TryPop(out float p1, out int id1));
         Assert.Equal((6f, 5), (p1, id1));
         Assert.True(heap.TryPop(out float p2, out int id2));
@@ -133,19 +168,21 @@ public class DistanceHeapTests
     }
 
     [Fact]
-    public void PushBounded_MinHeap_KeepsLargestPriorities_EvictingWorstFirst()
+    public void PushBounded_MinIdDescending_KeepsLargestPriorities_EvictingWorstFirst()
     {
-        using var heap = DistanceHeap.Rent(HeapOrder.Min, 8);
+        // The inverse order FlatIndex rents for DotProduct: the root is the smallest
+        // similarity (the worst kept hit), so a more similar candidate replaces it.
+        using var heap = DistanceHeap.Rent(HeapOrder.MinIdDescending, 8);
 
         Assert.True(heap.PushBounded(2, 1f, 0));
         Assert.True(heap.PushBounded(2, 4f, 1));
-        Assert.False(heap.PushBounded(2, 3f, 2));  // worse (smaller) than root 4 -> dropped
-        Assert.True(heap.PushBounded(2, 9f, 3));    // beats root 1 -> replaces it
-        Assert.False(heap.PushBounded(2, 8f, 4));  // worse than root 8 -> dropped
-        Assert.True(heap.PushBounded(2, 8.5f, 5));  // beats root 4 -> replaces it
+        Assert.True(heap.PushBounded(2, 3f, 2));    // beats 1 -> replaces it
+        Assert.True(heap.PushBounded(2, 9f, 3));    // beats 3 -> replaces it
+        Assert.True(heap.PushBounded(2, 8f, 4));    // beats 4 -> replaces it
+        Assert.True(heap.PushBounded(2, 8.5f, 5));  // beats 8 -> replaces it
         Assert.Equal(2, heap.Count);
 
-        // Remaining: (9,3), (8.5,5); min-heap pops worst (smallest) first.
+        // Remaining: (9,3), (8.5,5); popped worst-first: 8.5, then 9.
         Assert.True(heap.TryPop(out float p1, out int id1));
         Assert.Equal((8.5f, 5), (p1, id1));
         Assert.True(heap.TryPop(out float p2, out int id2));
@@ -153,20 +190,32 @@ public class DistanceHeapTests
     }
 
     [Fact]
-    public void PushBounded_Ties_KeepLowerId()
+    public void PushBounded_MaxIdDescending_Ties_KeepLowerId()
     {
-        using var heap = DistanceHeap.Rent(HeapOrder.Max, 4);
+        using var heap = DistanceHeap.Rent(HeapOrder.MaxIdDescending, 4);
         Assert.True(heap.PushBounded(2, 5f, 10));
         Assert.True(heap.PushBounded(2, 5f, 11));
-        // Equal priority, higher id loses against the root (which holds the lower id among ties).
+        // Root holds the higher id among ties, so a higher id is dropped and a lower one wins.
         Assert.False(heap.PushBounded(2, 5f, 12));
-        // Equal priority, lower id beats the root and replaces it.
         Assert.True(heap.PushBounded(2, 5f, 9));
 
+        Assert.Equal(2, heap.Count);
         Assert.True(heap.TryPop(out float p1, out int id1));
-        Assert.Equal((5f, 9), (p1, id1));
+        Assert.Equal((5f, 10), (p1, id1));
         Assert.True(heap.TryPop(out float p2, out int id2));
-        Assert.Equal((5f, 11), (p2, id2));
+        Assert.Equal((5f, 9), (p2, id2));
+    }
+
+    [Fact]
+    public void PushBounded_BelowLimit_AlwaysAccepts()
+    {
+        using var heap = DistanceHeap.Rent(HeapOrder.MaxIdAscending, 4);
+        for (int i = 0; i < 4; i++)
+        {
+            Assert.True(heap.PushBounded(4, -i, i));
+        }
+
+        Assert.Equal(4, heap.Count);
     }
 
     [Fact]
@@ -174,16 +223,23 @@ public class DistanceHeapTests
     {
         Assert.Throws<ArgumentOutOfRangeException>(() =>
         {
-            using var heap = DistanceHeap.Rent(HeapOrder.Min, 4);
+            using var heap = DistanceHeap.Rent(HeapOrder.MinIdAscending, 4);
             heap.PushBounded(0, 1f, 0);
+        });
+
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+        {
+            using var heap = DistanceHeap.Rent(HeapOrder.MaxIdDescending, 4);
+            heap.PushBounded(-1, 1f, 0);
         });
     }
 
     [Fact]
     public void Push_GrowsBeyondRentedCapacity()
     {
-        using var heap = DistanceHeap.Rent(HeapOrder.Min, 2);
-        Assert.Equal(2, heap.Capacity);
+        using var heap = DistanceHeap.Rent(HeapOrder.MinIdAscending, 2);
+        // ArrayPool rents a whole size bucket, so capacity is only guaranteed to be >= request.
+        Assert.True(heap.Capacity >= 2);
 
         for (int i = 0; i < 500; i++)
         {
@@ -203,14 +259,15 @@ public class DistanceHeapTests
     [Fact]
     public void PushBounded_GrowsLimitBeyondRentedCapacity()
     {
-        using var heap = DistanceHeap.Rent(HeapOrder.Max, 2);
+        using var heap = DistanceHeap.Rent(HeapOrder.MinIdDescending, 2);
         for (int i = 0; i < 100; i++)
         {
             Assert.True(heap.PushBounded(50, i, i));
         }
 
-        // Keeps the fifty largest priorities: 50..99, popped worst-first: 99 down to 50.
-        for (int i = 99; i >= 50; i--)
+        // Keeps the fifty largest priorities: 50..99. The root is the worst kept (smallest),
+        // so popping yields them in ascending order.
+        for (int i = 50; i < 100; i++)
         {
             Assert.True(heap.TryPop(out float priority, out int id));
             Assert.Equal(i, id);
@@ -223,7 +280,7 @@ public class DistanceHeapTests
     [Fact]
     public void Clear_AllowsFullReuse()
     {
-        using var heap = DistanceHeap.Rent(HeapOrder.Min, 8);
+        using var heap = DistanceHeap.Rent(HeapOrder.MinIdAscending, 8);
         for (int i = 0; i < 10; i++)
         {
             heap.Push(i, i);
@@ -238,7 +295,8 @@ public class DistanceHeapTests
             heap.Push(-i, i);
         }
 
-        for (int i = 10; i < 20; i++)
+        // Min-heap: the most negative priority (-19) is the root and pops first.
+        for (int i = 19; i >= 10; i--)
         {
             Assert.True(heap.TryPop(out float priority, out int id));
             Assert.Equal(i, id);
@@ -249,7 +307,7 @@ public class DistanceHeapTests
     [Fact]
     public void TryPeekRoot_DoesNotRemove()
     {
-        using var heap = DistanceHeap.Rent(HeapOrder.Min, 4);
+        using var heap = DistanceHeap.Rent(HeapOrder.MinIdAscending, 4);
         Assert.False(heap.TryPeekRoot(out _, out _));
 
         heap.Push(7f, 3);
@@ -263,21 +321,33 @@ public class DistanceHeapTests
     [Fact]
     public void IsBetterThanRoot_FollowsHeapOrder()
     {
-        using var minHeap = DistanceHeap.Rent(HeapOrder.Min, 4);
-        Assert.False(minHeap.IsBetterThanRoot(0f, 0));
-        minHeap.Push(5f, 7);
-        Assert.True(minHeap.IsBetterThanRoot(4.9f, 1));
-        Assert.False(minHeap.IsBetterThanRoot(5.1f, 1));
-        Assert.False(minHeap.IsBetterThanRoot(5f, 8)); // tie: higher id loses
-        Assert.True(minHeap.IsBetterThanRoot(5f, 3));  // tie: lower id wins
+        using var minAscending = DistanceHeap.Rent(HeapOrder.MinIdAscending, 4);
+        Assert.False(minAscending.IsBetterThanRoot(0f, 0)); // empty heap has no root
+        minAscending.Push(5f, 7);
+        Assert.True(minAscending.IsBetterThanRoot(4.9f, 1));
+        Assert.False(minAscending.IsBetterThanRoot(5.1f, 1));
+        Assert.False(minAscending.IsBetterThanRoot(5f, 8)); // tie: higher id loses
+        Assert.True(minAscending.IsBetterThanRoot(5f, 3));  // tie: lower id wins
 
-        using var maxHeap = DistanceHeap.Rent(HeapOrder.Max, 4);
-        Assert.False(maxHeap.IsBetterThanRoot(0f, 0));
-        maxHeap.Push(5f, 7);
-        Assert.True(maxHeap.IsBetterThanRoot(5.1f, 1));
-        Assert.False(maxHeap.IsBetterThanRoot(4.9f, 1));
-        Assert.False(maxHeap.IsBetterThanRoot(5f, 8));
-        Assert.True(maxHeap.IsBetterThanRoot(5f, 3));
+        using var maxAscending = DistanceHeap.Rent(HeapOrder.MaxIdAscending, 4);
+        Assert.False(maxAscending.IsBetterThanRoot(0f, 0));
+        maxAscending.Push(5f, 7);
+        Assert.True(maxAscending.IsBetterThanRoot(5.1f, 1));
+        Assert.False(maxAscending.IsBetterThanRoot(4.9f, 1));
+        Assert.False(maxAscending.IsBetterThanRoot(5f, 8));
+        Assert.True(maxAscending.IsBetterThanRoot(5f, 3));
+
+        using var maxDescending = DistanceHeap.Rent(HeapOrder.MaxIdDescending, 4);
+        maxDescending.Push(5f, 7);
+        Assert.True(maxDescending.IsBetterThanRoot(5f, 8)); // tie: higher id wins
+        Assert.False(maxDescending.IsBetterThanRoot(5f, 3));
+        Assert.True(maxDescending.IsBetterThanRoot(5.1f, 3));
+
+        using var minDescending = DistanceHeap.Rent(HeapOrder.MinIdDescending, 4);
+        minDescending.Push(5f, 7);
+        Assert.True(minDescending.IsBetterThanRoot(5f, 8));
+        Assert.False(minDescending.IsBetterThanRoot(5f, 3));
+        Assert.True(minDescending.IsBetterThanRoot(4.9f, 3));
     }
 
     [Fact]
@@ -285,7 +355,7 @@ public class DistanceHeapTests
     {
         for (int cycle = 0; cycle < 3; cycle++)
         {
-            using var heap = DistanceHeap.Rent(HeapOrder.Min, 64);
+            using var heap = DistanceHeap.Rent(HeapOrder.MinIdAscending, 64);
             Assert.Equal(0, heap.Count);
             for (int i = 99; i >= 0; i--)
             {
@@ -300,83 +370,110 @@ public class DistanceHeapTests
         }
     }
 
-    [Fact]
-    public void RandomizedOperations_MatchSortedListModel()
+    [Theory]
+    [MemberData(nameof(Orders))]
+    public void RandomizedOperations_MatchSortedListModel(int orderValue)
     {
+        var order = (HeapOrder)orderValue;
         const int operations = 600;
 
-        for (int trial = 0; trial < 2; trial++)
+        using var heap = DistanceHeap.Rent(order, 16);
+        var model = new List<(float Priority, int Id)>();
+        ulong state = DeterministicRandom.DeriveSeed(0x5eed_6003, (int)order);
+
+        for (int op = 0; op < operations; op++)
         {
-            HeapOrder order = trial == 0 ? HeapOrder.Min : HeapOrder.Max;
-            using var heap = DistanceHeap.Rent(order, 16);
-            var model = new List<(float Priority, int Id)>();
-            ulong state = DeterministicRandom.DeriveSeed(0x5eed_6003, trial);
-
-            for (int op = 0; op < operations; op++)
-            {
-                int kind = DeterministicRandom.NextInt(ref state, 3);
-                if (kind != 0 || model.Count == 0)
-                {
-                    float priority = DeterministicRandom.NextFloat(ref state) * 100f;
-                    heap.Push(priority, op);
-                    model.Add((priority, op));
-                }
-                else
-                {
-                    var expected = order == HeapOrder.Min
-                        ? model.OrderBy(x => x.Priority).ThenBy(x => x.Id).First()
-                        : model.OrderByDescending(x => x.Priority).ThenBy(x => x.Id).First();
-
-                    Assert.True(heap.TryPop(out float priority, out int id));
-                    FloatAssertions.Equal(expected.Priority, priority, 0f);
-                    Assert.Equal(expected.Id, id);
-                    model.Remove(expected);
-                }
-            }
-
-            Assert.Equal(model.Count, heap.Count);
-        }
-    }
-
-    [Fact]
-    public void RandomizedPushBounded_MatchesTopKModel()
-    {
-        const int limit = 7;
-
-        for (int trial = 0; trial < 2; trial++)
-        {
-            HeapOrder order = trial == 0 ? HeapOrder.Min : HeapOrder.Max;
-            using var heap = DistanceHeap.Rent(order, limit);
-            var model = new List<(float Priority, int Id)>();
-            ulong state = DeterministicRandom.DeriveSeed(0x5eed_6004, trial);
-
-            for (int id = 0; id < 800; id++)
+            int kind = DeterministicRandom.NextInt(ref state, 3);
+            if (kind != 0 || model.Count == 0)
             {
                 float priority = DeterministicRandom.NextFloat(ref state) * 100f;
-                bool accepted = heap.PushBounded(limit, priority, id);
-
-                model.Add((priority, id));
-                var best = order == HeapOrder.Min
-                    ? model.OrderBy(x => x.Priority).ThenBy(x => x.Id).Take(limit).ToList()
-                    : model.OrderByDescending(x => x.Priority).ThenBy(x => x.Id).Take(limit).ToList();
-
-                Assert.Equal(best.Count, heap.Count);
-                Assert.Equal(best.Contains((priority, id)), accepted);
+                heap.Push(priority, op);
+                model.Add((priority, op));
             }
-
-            // Final contents must be exactly the model's top-k, drained worst-first.
-            var expected = order == HeapOrder.Min
-                ? model.OrderBy(x => x.Priority).ThenBy(x => x.Id).Take(limit).Reverse().ToList()
-                : model.OrderByDescending(x => x.Priority).ThenBy(x => x.Id).Take(limit).Reverse().ToList();
-
-            foreach (var item in expected)
+            else
             {
-                Assert.True(heap.TryPop(out float priority, out int id));
-                FloatAssertions.Equal(item.Priority, priority, 0f);
-                Assert.Equal(item.Id, id);
-            }
+                model.Sort((a, b) => CompareBestFirst(order, a, b));
+                var expected = model[0];
 
-            Assert.False(heap.TryPop(out _, out _));
+                Assert.True(heap.TryPop(out float priority, out int id));
+                FloatAssertions.Equal(expected.Priority, priority, 0f);
+                Assert.Equal(expected.Id, id);
+                model.RemoveAt(0);
+            }
         }
+
+        Assert.Equal(model.Count, heap.Count);
+        model.Sort((a, b) => CompareBestFirst(order, a, b));
+        foreach (var expected in model)
+        {
+            Assert.True(heap.TryPop(out float priority, out int id));
+            FloatAssertions.Equal(expected.Priority, priority, 0f);
+            Assert.Equal(expected.Id, id);
+        }
+
+        Assert.False(heap.TryPop(out _, out _));
     }
+
+    [Theory]
+    [MemberData(nameof(Orders))]
+    public void RandomizedPushBounded_MatchesTopKModel(int orderValue)
+    {
+        var order = (HeapOrder)orderValue;
+        const int limit = 7;
+
+        using var heap = DistanceHeap.Rent(order, limit);
+        var model = new List<(float Priority, int Id)>();
+        ulong state = DeterministicRandom.DeriveSeed(0x5eed_6004, (int)order);
+
+        for (int id = 0; id < 800; id++)
+        {
+            float priority = DeterministicRandom.NextFloat(ref state) * 100f;
+            bool accepted = heap.PushBounded(limit, priority, id);
+
+            model.Add((priority, id));
+            model.Sort((a, b) => CompareWorstFirst(order, a, b));
+            var expected = model.Take(limit).ToList();
+
+            Assert.Equal(expected.Count, heap.Count);
+            Assert.Equal(expected.Contains((priority, id)), accepted);
+        }
+
+        // Draining yields the kept set best-first, i.e. the reverse of the worst-first model.
+        var expectedPopOrder = model.Take(limit).ToList();
+        expectedPopOrder.Sort((a, b) => CompareBestFirst(order, a, b));
+        foreach (var item in expectedPopOrder)
+        {
+            Assert.True(heap.TryPop(out float priority, out int id));
+            FloatAssertions.Equal(item.Priority, priority, 0f);
+            Assert.Equal(item.Id, id);
+        }
+
+        Assert.False(heap.TryPop(out _, out _));
+    }
+
+    /// <summary>Orders pairs from worst to best under <paramref name="order"/>.</summary>
+    private static int CompareWorstFirst(HeapOrder order, (float Priority, int Id) a, (float Priority, int Id) b)
+    {
+        int byPriority = order switch
+        {
+            HeapOrder.MinIdAscending or HeapOrder.MinIdDescending => b.Priority.CompareTo(a.Priority),
+            HeapOrder.MaxIdAscending or HeapOrder.MaxIdDescending => a.Priority.CompareTo(b.Priority),
+            _ => throw new InvalidOperationException($"Unknown heap order '{order}'."),
+        };
+
+        if (byPriority != 0)
+        {
+            return byPriority;
+        }
+
+        return order switch
+        {
+            HeapOrder.MinIdAscending or HeapOrder.MaxIdAscending => b.Id.CompareTo(a.Id),
+            HeapOrder.MaxIdDescending or HeapOrder.MinIdDescending => a.Id.CompareTo(b.Id),
+            _ => throw new InvalidOperationException($"Unknown heap order '{order}'."),
+        };
+    }
+
+    private static int CompareBestFirst(HeapOrder order, (float Priority, int Id) a, (float Priority, int Id) b) =>
+        -CompareWorstFirst(order, a, b);
 }

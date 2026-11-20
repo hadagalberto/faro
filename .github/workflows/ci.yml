@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build & test (${{ matrix.os }}, net8.0 + net10.0)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # SourceLink needs the full history for deterministic source paths.
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Restore
+        run: dotnet restore Faro.sln
+
+      - name: Build (warnings as errors)
+        run: dotnet build Faro.sln -c Release --no-restore -warnaserror
+        env:
+          CI: true
+
+      - name: Test (net8.0 + net10.0)
+        run: dotnet test Faro.sln -c Release --no-build
+
+  aot-smoke:
+    name: Native AOT publish + sample smoke (linux-x64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Install Native AOT prerequisites
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Publish the RAG sample with Native AOT
+        run: >-
+          dotnet publish samples/Faro.Samples.Rag/Faro.Samples.Rag.csproj
+          -c Release -f net10.0 -r linux-x64
+          -p:PublishAot=true -warnaserror
+
+      - name: Run the published sample
+        run: ./samples/Faro.Samples.Rag/bin/Release/net10.0/linux-x64/publish/Faro.Samples.Rag

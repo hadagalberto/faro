@@ -50,17 +50,22 @@ public class BitVectorsTests
     {
         var vector = new float[]
         {
-            0f,              // +0 -> bit 0
-            -0f,             // -0 -> bit 1 (raw sign bit)
-            float.NaN,       // positive NaN -> bit 2 clear
-            NegativeNaN(),   // negative NaN -> bit 3 set
-            -1f,             // -> bit 4 set
-            1f,              // -> bit 5 clear
+            0f,               // +0 -> bit 0 clear
+            -0f,              // -0 -> bit 1 set (raw sign bit)
+            PositiveNaN(),    // positive NaN -> bit 2 clear
+            NegativeNaN(),    // negative NaN -> bit 3 set
+            -1f,              // -> bit 4 set
+            1f,               // -> bit 5 clear
         };
 
         ulong packed = BitVectors.PackSignBits(vector)[0];
         Assert.Equal(0b0001_1010UL, packed);
 
+        // .NET's canonical float.NaN has its sign bit set (0xFFC0_0000); alone it sets bit 0.
+        Assert.Equal(0b0000_0001UL, BitVectors.PackSignBits([float.NaN])[0]);
+        Assert.Equal(0UL, BitVectors.PackSignBits([PositiveNaN()])[0]);
+
+        static float PositiveNaN() => BitConverter.Int32BitsToSingle(0x7FC0_0000);
         static float NegativeNaN() => BitConverter.Int32BitsToSingle(unchecked((int)0xFFC0_0000));
     }
 

@@ -19,13 +19,24 @@ internal ref struct VisitedSet
     private int[] _stamps;
     private int _version;
     private int _count;
+    private readonly bool _rented;
 
     // Internal for the overflow-branch test, which places the generation at its ceiling.
+    // The array is caller-owned, so Dispose must not return it to the shared pool.
     internal VisitedSet(int[] stamps, int version)
     {
         _stamps = stamps;
         _version = version;
         _count = 0;
+        _rented = false;
+    }
+
+    private VisitedSet(int[] stamps, int version, bool rented)
+    {
+        _stamps = stamps;
+        _version = version;
+        _count = 0;
+        _rented = rented;
     }
 
     /// <summary>Number of distinct ids currently marked.</summary>
@@ -37,7 +48,7 @@ internal ref struct VisitedSet
         ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
         int[] stamps = ArrayPool<int>.Shared.Rent(capacity);
         Array.Clear(stamps);
-        return new VisitedSet(stamps, 1);
+        return new VisitedSet(stamps, 1, rented: true);
     }
 
     /// <summary>Marks an id as visited.</summary>
@@ -75,10 +86,13 @@ internal ref struct VisitedSet
         _count = 0;
     }
 
-    /// <summary>Returns the backing array to the pool. The set must not be used afterwards.</summary>
+    /// <summary>
+    /// Returns the backing array to the pool when it was rented. Caller-owned arrays (the
+    /// internal test constructor) are left alone. The set must not be used afterwards.
+    /// </summary>
     public void Dispose()
     {
-        if (_stamps.Length != 0)
+        if (_rented && _stamps.Length != 0)
         {
             ArrayPool<int>.Shared.Return(_stamps);
         }

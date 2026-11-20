@@ -7,6 +7,7 @@ namespace Faro.Tests.Quantization;
 /// End-to-end checks that quantized search returns full-precision scores (proving the rescore
 /// pass runs) and recovers the exact neighbours on deterministic clustered data.
 /// </summary>
+[Collection("ZeroAllocation")]
 public class QuantizationIntegrationTests
 {
     private const int Queries = 12;
@@ -251,18 +252,7 @@ public class QuantizationIntegrationTests
 
         float[] query = data[0];
         var buffer = new SearchResult[10];
-        for (int i = 0; i < 2_000; i++)
-        {
-            index.Search(query, 10, buffer);
-        }
-
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 2_000; i++)
-        {
-            index.Search(query, 10, buffer);
-        }
-
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
+        ZeroAllocationAssert.Run(() => index.Search(query, 10, buffer));
     }
 
     [Theory]
@@ -288,18 +278,7 @@ public class QuantizationIntegrationTests
 
         float[] query = data[0];
         var buffer = new SearchResult[10];
-        for (int i = 0; i < 2_000; i++)
-        {
-            index.Search(query, 10, buffer);
-        }
-
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 2_000; i++)
-        {
-            index.Search(query, 10, buffer);
-        }
-
-        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
+        ZeroAllocationAssert.Run(() => index.Search(query, 10, buffer));
     }
 
     private static (FlatIndex Exact, FlatIndex Quantized) BuildFlatPair(

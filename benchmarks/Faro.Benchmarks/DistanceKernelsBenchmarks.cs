@@ -8,6 +8,7 @@ namespace Faro.Benchmarks;
 /// Raw distance kernel throughput: the hot inner loop of every search.
 /// </summary>
 [MemoryDiagnoser]
+[SimpleJob(warmupCount: 2, iterationCount: 5)]
 public class DistanceKernelsBenchmarks
 {
     [Params(128, 768)]

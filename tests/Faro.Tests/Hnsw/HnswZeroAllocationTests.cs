@@ -4,6 +4,7 @@ using Xunit;
 
 namespace Faro.Tests.Hnsw;
 
+[Collection("ZeroAllocation")]
 public class HnswZeroAllocationTests
 {
     private const int Count = 2_048;
@@ -35,19 +36,6 @@ public class HnswZeroAllocationTests
         var query = DeterministicRandom.UniformVector(Dim, 0x5eed_9002);
         var buffer = new SearchResult[16];
 
-        // Warm the JIT and every ArrayPool bucket the search touches.
-        for (int i = 0; i < 3_000; i++)
-        {
-            index.Search(query, 16, buffer);
-        }
-
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 3_000; i++)
-        {
-            index.Search(query, 16, buffer);
-        }
-
-        long after = GC.GetAllocatedBytesForCurrentThread();
-        Assert.Equal(before, after);
+        ZeroAllocationAssert.Run(() => index.Search(query, 16, buffer));
     }
 }

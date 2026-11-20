@@ -8,6 +8,7 @@ namespace Faro.Benchmarks;
 /// Exact Flat search: SIMD sequential vs parallel vs a naive scalar brute force with a sort.
 /// </summary>
 [MemoryDiagnoser]
+[SimpleJob(warmupCount: 2, iterationCount: 5)]
 public class FlatSearchBenchmarks
 {
     [Params(20_000)]

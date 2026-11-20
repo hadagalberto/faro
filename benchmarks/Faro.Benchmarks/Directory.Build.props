@@ -1,0 +1,12 @@
+<Project>
+  <Import Project="..\..\Directory.Build.props" />
+
+  <PropertyGroup>
+    <!-- BenchmarkDotNet generates a project under bin/ that sets a single TargetFramework in its
+         own body, after Sdk.props has already imported this file. If the plural TargetFrameworks
+         from the root props survives, NuGet restores net8.0 for the net10.0-only benchmark
+         project and fails with NU1201. Clearing it here leaves the generated single TFM intact.
+         Faro.Benchmarks.csproj sets its own TargetFrameworks after this import. -->
+    <TargetFrameworks />
+  </PropertyGroup>
+</Project>

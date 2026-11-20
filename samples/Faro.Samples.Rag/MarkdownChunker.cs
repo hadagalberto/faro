@@ -13,8 +13,11 @@ public static class MarkdownChunker
     {
         ArgumentNullException.ThrowIfNull(markdown);
 
+        // Markdown comes from files, whose newlines depend on the OS and git checkout settings.
+        // Normalize before splitting so a CRLF checkout produces exactly the same chunks as LF.
+        var normalized = markdown.Replace("\r\n", "\n").Replace('\r', '\n');
         var chunks = new List<string>();
-        foreach (var rawBlock in markdown.Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
+        foreach (var rawBlock in normalized.Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
         {
             var block = StripMarkdownSyntax(rawBlock);
             if (block.Length == 0)

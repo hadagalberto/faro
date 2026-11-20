@@ -317,7 +317,7 @@ public sealed class FaroCollection<T>
         ReadOnlySpan<float> prepared = query;
         if (_index.NormalizesOnAdd)
         {
-            normalized = ArrayPool<float>.Shared.Rent(dimensions);
+            normalized = FaroPool<float>.Instance.Rent(dimensions);
             Distances.CopyNormalized(query, normalized.AsSpan(0, dimensions));
             prepared = normalized.AsSpan(0, dimensions);
         }
@@ -327,12 +327,12 @@ public sealed class FaroCollection<T>
         if (hamming)
         {
             int words = BitVectors.WordsFor(dimensions);
-            packedQuery = ArrayPool<ulong>.Shared.Rent(words);
-            scratch = ArrayPool<ulong>.Shared.Rent(words);
+            packedQuery = FaroPool<ulong>.Instance.Rent(words);
+            scratch = FaroPool<ulong>.Instance.Rent(words);
             BitVectors.PackSignBits(query, packedQuery.AsSpan(0, words));
         }
 
-        float[] stored = ArrayPool<float>.Shared.Rent(dimensions);
+        float[] stored = FaroPool<float>.Instance.Rent(dimensions);
         try
         {
             HeapOrder order = Distances.LowerIsCloser(_index.Distance)
@@ -371,20 +371,20 @@ public sealed class FaroCollection<T>
         {
             if (normalized is not null)
             {
-                ArrayPool<float>.Shared.Return(normalized);
+                FaroPool<float>.Instance.Return(normalized);
             }
 
             if (packedQuery is not null)
             {
-                ArrayPool<ulong>.Shared.Return(packedQuery);
+                FaroPool<ulong>.Instance.Return(packedQuery);
             }
 
             if (scratch is not null)
             {
-                ArrayPool<ulong>.Shared.Return(scratch);
+                FaroPool<ulong>.Instance.Return(scratch);
             }
 
-            ArrayPool<float>.Shared.Return(stored);
+            FaroPool<float>.Instance.Return(stored);
         }
     }
 }

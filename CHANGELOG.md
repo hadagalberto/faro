@@ -4,9 +4,21 @@ All notable changes to Faro are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
-### Planned
+## [0.7.0] — Milestone 7
 
-- Real benchmark table and remaining documentation polish.
+### Added
+
+- BenchmarkDotNet suites for insert and search throughput/latency across Flat, HNSW, int8 and binary (with `MemoryDiagnoser`), plus a scoped build configuration so BenchmarkDotNet's generated project builds on the net10.0-only benchmark project.
+- Recorded real measurements on an AMD Ryzen 9 7900X3D / Windows 11 / .NET 10.0.14 machine in both READMEs.
+- `ZeroAllocationAssert`: a shared allocation harness that warms every path with the measurement parameters and forces a gen2 collection before measuring; allocation tests share the non-parallel `ZeroAllocation` collection.
+- `FaroPoolTests` and `HnswAlgorithm4OptionsTests`, covering the private-pool invariant and the behavioural effect of every Algorithm 4 toggle.
+
+### Changed
+
+- Searches now rent scratch buffers from private, non-trimming `ArrayPool<T>.Create()` pools instead of `ArrayPool<T>.Shared`. The shared pool's gen2 trim callback was the root cause of intermittent steady-state allocation failures.
+- `MarkdownChunker` normalizes CRLF input so the RAG sample behaves identically on Windows and Linux checkouts; added a regression test.
+- Added `.gitattributes` (`* text=auto eol=lf`, byte-exact files `-text`) and cross-platform guidance in `CONTRIBUTING.md`.
+- Completed `README.pt-BR.md`, `docs/architecture.md`, `docs/tuning.md` and `docs/file-format.md` (WAL delete record and checkpoint header order) against SPEC.
 
 ## [0.6.0] — Milestone 6
 

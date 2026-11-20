@@ -15,7 +15,14 @@ dotnet build Faro.sln -c Release -warnaserror
 dotnet test Faro.sln -c Release
 ```
 
-Target frameworks are `net8.0` and `net10.0`; warnings are errors in `Directory.Build.props`. Both test projects use xUnit v3 with Microsoft.Testing.Platform. CI runs the same build and test commands on Ubuntu and Windows, plus a Native AOT publish of the RAG sample.
+Target frameworks are `net8.0` and `net10.0`; warnings are errors in `Directory.Build.props`. All test projects use xUnit v3 with Microsoft.Testing.Platform. CI runs the same build and test commands on Ubuntu and Windows, plus a Native AOT publish of the RAG sample.
+
+Cross-platform rules (enforced by `.gitattributes` and CI):
+
+- Text files use LF in the repository and in checkouts (`.gitattributes: * text=auto eol=lf`); byte-exact fixtures and binaries are marked `-text`. Do not add CRLF to sources.
+- Do not locate `dotnet`, `npm` or `cargo` through a runtime binary path. If a test needs a built artifact, build it in the workflow before the test step.
+- Do not rely on OS/ICU-specific behaviour (text-encoding labels, culture, timezone, path separators, line endings) without normalizing it in the test.
+- Verify every new CI step against both Ubuntu and Windows runners.
 
 ## Code style
 

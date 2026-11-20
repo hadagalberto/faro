@@ -71,7 +71,7 @@ internal ref struct DistanceHeap
     public static DistanceHeap Rent(HeapOrder order, int capacity)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
-        var items = ArrayPool<(float, int)>.Shared.Rent(capacity);
+        var items = FaroPool<(float, int)>.Instance.Rent(capacity);
         return new DistanceHeap(order, items);
     }
 
@@ -176,7 +176,7 @@ internal ref struct DistanceHeap
     {
         if (_items.Length != 0)
         {
-            ArrayPool<(float, int)>.Shared.Return(_items);
+            FaroPool<(float, int)>.Instance.Return(_items);
         }
 
         _items = [];
@@ -191,9 +191,9 @@ internal ref struct DistanceHeap
             throw new OutOfMemoryException("DistanceHeap cannot grow further.");
         }
 
-        var grown = ArrayPool<(float, int)>.Shared.Rent(newCapacity);
+        var grown = FaroPool<(float, int)>.Instance.Rent(newCapacity);
         Array.Copy(_items, grown, _count);
-        ArrayPool<(float, int)>.Shared.Return(_items);
+        FaroPool<(float, int)>.Instance.Return(_items);
         _items = grown;
     }
 

@@ -21,7 +21,7 @@ Faro persists one database as two files: a checkpoint (`knowledge.faro`) and its
 | Text pages | BM25 postings and document lengths (validated for integrity) |
 | WAL | Separate `.wal` file: append-only typed records with a CRC32C per record |
 
-All integers are little-endian. Padding bytes are zero. The header is written last during checkpoint creation, so an incomplete checkpoint is never mistaken for a committed one.
+All integers are little-endian. Padding bytes are zero. Checkpoints are built in a temporary file: the header is written first, then the page table and pages, and the file is flushed before an atomic rename publishes it. Readers therefore only ever see a fully written checkpoint at the final path.
 
 ## Checkpoint header (128 bytes)
 
@@ -86,6 +86,7 @@ Record types:
 | `1` | Collection id + serialized collection definition |
 | `2` | Collection id + full node snapshot (vector, level, topology) + full stored record (key and payload bytes) |
 | `3` | Collection id + internal id of a deleted node |
+| `4` | Collection id (delete collection) |
 
 Records are self-contained: an upsert carries the complete vector, payload and key, so replaying any prefix of well-formed records yields a consistent prefix of committed operations. A partial frame, a length that runs past the end of the file, or a CRC mismatch marks a torn tail. The scan stops there; every earlier record is replayed in order, and the file is truncated to the last valid frame before new writes are appended.
 

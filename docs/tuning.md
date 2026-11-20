@@ -23,7 +23,7 @@ Cosine with `NormalizeOnAdd = true` (the default) stores unit vectors and scores
 
 ## Allocations
 
-The span overload `Search(ReadOnlySpan<float>, int, Span<SearchResult>)` reuses a caller-owned result buffer and rents its heap/query scratch from `ArrayPool<T>`. Its steady-state allocation is zero for all four metrics. The allocating overload differs only by the returned result array.
+The span overload `Search(ReadOnlySpan<float>, int, Span<SearchResult>)` reuses a caller-owned result buffer and rents its heap/query scratch from Faro's private, non-trimming `FaroPool<T>` (built on `ArrayPool<T>.Create()`). Its steady-state allocation is zero for all four metrics, on both Flat and HNSW, with or without quantization. The allocating overload differs only by the returned result array. A gen2 collection does not change this: the private pool is never trimmed by the runtime.
 
 ## Determinism and tie-breaks
 
@@ -42,6 +42,17 @@ BenchmarkDotNet pinning and hardware reporting make these numbers machine-specif
 
 `Quantization.Int8(rescore, quantile)` trains per-dimension ranges; `quantile` (e.g. 0.995) clips outliers so the byte is spent on the bulk of the distribution. `Quantization.Binary(rescore)` trades one bit per dimension for a popcount first pass. `rescore` is the oversampling factor: larger values recover more full-precision recall at the cost of rescoring more candidates. On 768-d normalized data, `rescore = 4` for int8 and `rescore = 8` for binary clear the SPEC gates; raise them if your data is less clustered. Supply a pretrained `ScalarQuantizer`/`BinaryQuantizer` for reproducible ranges, otherwise the index trains once from the first vectors added.
 
-## Planned knobs
+## HNSWOptions
 
-HNSW exposes `M`, `EfConstruction`, `EfSearch`, a deterministic build seed, and neighbour-selection options; durability will expose `Always`/`Batched`/`None`. These are documented here as design intent and are not available in Milestone 3.
+| Option | Default | Guidance |
+| --- | --- | --- |
+| `M` | 16 | Layer-0 degree bound is `2 * M`. Higher builds slower but improves recall on difficult data. |
+| `EfConstruction` | 200 | Larger builds slower and more connected; 128–400 is typical. |
+| `EfSearch` | 64 | The main recall/latency dial. Raise until recall stops improving; the recall suite gates at 64. |
+| `Seed` | `null` | Set for reproducible levels and graphs; leave unset for randomized builds. |
+| `ExtendCandidates` / `KeepPrunedConnections` / `Mc` | `true` / `false` / 1.0 | Algorithm 4 knobs: candidate expansion, pruned fallback and diversity relaxation. Tests in `HnswAlgorithm4OptionsTests` prove each toggle changes the graph. |
+| `InitialCapacity` | 1024 | Pre-size for bulk loads to avoid node-array copies. |
+
+## Durability
+
+`FaroOptions.Durability` selects `Always` (fsync every WAL record), `Batched` (default; fsync on flush/checkpoint) or `None` (fastest, no crash guarantee). `db.Checkpoint()` compacts the WAL into a fresh checkpoint with an atomic rename; do not search a database instance while checkpointing it.

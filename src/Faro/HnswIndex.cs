@@ -563,7 +563,7 @@ public sealed class HnswIndex
         }
 
         var scorer = new QueryScorer(this, node.Vector.Floats, (node.Bits is null ? default : node.Bits.Bits));
-        int[] buffer = ArrayPool<int>.Shared.Rent(Math.Max(_efConstruction, 1));
+        int[] buffer = FaroPool<int>.Instance.Rent(Math.Max(_efConstruction, 1));
         try
         {
             int entry = entryId;
@@ -614,7 +614,7 @@ public sealed class HnswIndex
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(buffer);
+            FaroPool<int>.Instance.Return(buffer);
         }
     }
 
@@ -1024,21 +1024,21 @@ public sealed class HnswIndex
         ulong[]? packed = null;
         if (_normalize)
         {
-            normalized = ArrayPool<float>.Shared.Rent(_dimensions);
+            normalized = FaroPool<float>.Instance.Rent(_dimensions);
             Distances.CopyNormalized(query, normalized.AsSpan(0, _dimensions));
             effective = normalized.AsSpan(0, _dimensions);
         }
 
         if (_distance == Distance.Hamming)
         {
-            packed = ArrayPool<ulong>.Shared.Rent(_wordsPerVector);
+            packed = FaroPool<ulong>.Instance.Rent(_wordsPerVector);
             BitVectors.PackSignBits(query, packed.AsSpan(0, _wordsPerVector));
         }
 
         byte[]? queryCode = null;
         if (quantized)
         {
-            queryCode = ArrayPool<byte>.Shared.Rent(_codeLength);
+            queryCode = FaroPool<byte>.Instance.Rent(_codeLength);
             Span<byte> querySpan = queryCode.AsSpan(0, _codeLength);
             if (_distance == Distance.Hamming)
             {
@@ -1050,7 +1050,7 @@ public sealed class HnswIndex
             }
         }
 
-        int[] candidates = ArrayPool<int>.Shared.Rent(beam);
+        int[] candidates = FaroPool<int>.Instance.Rent(beam);
         try
         {
             ReadOnlySpan<ulong> packedQuery = packed is null ? default : packed.AsSpan(0, _wordsPerVector);
@@ -1107,20 +1107,20 @@ public sealed class HnswIndex
         {
             if (normalized is not null)
             {
-                ArrayPool<float>.Shared.Return(normalized);
+                FaroPool<float>.Instance.Return(normalized);
             }
 
             if (packed is not null)
             {
-                ArrayPool<ulong>.Shared.Return(packed);
+                FaroPool<ulong>.Instance.Return(packed);
             }
 
             if (queryCode is not null)
             {
-                ArrayPool<byte>.Shared.Return(queryCode);
+                FaroPool<byte>.Instance.Return(queryCode);
             }
 
-            ArrayPool<int>.Shared.Return(candidates);
+            FaroPool<int>.Instance.Return(candidates);
         }
     }
 
@@ -1213,21 +1213,21 @@ public sealed class HnswIndex
         ulong[]? packed = null;
         if (_normalize)
         {
-            normalized = ArrayPool<float>.Shared.Rent(_dimensions);
+            normalized = FaroPool<float>.Instance.Rent(_dimensions);
             Distances.CopyNormalized(query, normalized.AsSpan(0, _dimensions));
             effective = normalized.AsSpan(0, _dimensions);
         }
 
         if (_distance == Distance.Hamming)
         {
-            packed = ArrayPool<ulong>.Shared.Rent(_wordsPerVector);
+            packed = FaroPool<ulong>.Instance.Rent(_wordsPerVector);
             BitVectors.PackSignBits(query, packed.AsSpan(0, _wordsPerVector));
         }
 
         byte[]? queryCode = null;
         if (quantized)
         {
-            queryCode = ArrayPool<byte>.Shared.Rent(_codeLength);
+            queryCode = FaroPool<byte>.Instance.Rent(_codeLength);
             Span<byte> querySpan = queryCode.AsSpan(0, _codeLength);
             if (_distance == Distance.Hamming)
             {
@@ -1239,7 +1239,7 @@ public sealed class HnswIndex
             }
         }
 
-        int[] candidates = ArrayPool<int>.Shared.Rent(beam);
+        int[] candidates = FaroPool<int>.Instance.Rent(beam);
         try
         {
             ReadOnlySpan<ulong> packedQuery = packed is null ? default : packed.AsSpan(0, _wordsPerVector);
@@ -1305,20 +1305,20 @@ public sealed class HnswIndex
         {
             if (normalized is not null)
             {
-                ArrayPool<float>.Shared.Return(normalized);
+                FaroPool<float>.Instance.Return(normalized);
             }
 
             if (packed is not null)
             {
-                ArrayPool<ulong>.Shared.Return(packed);
+                FaroPool<ulong>.Instance.Return(packed);
             }
 
             if (queryCode is not null)
             {
-                ArrayPool<byte>.Shared.Return(queryCode);
+                FaroPool<byte>.Instance.Return(queryCode);
             }
 
-            ArrayPool<int>.Shared.Return(candidates);
+            FaroPool<int>.Instance.Return(candidates);
         }
     }
 

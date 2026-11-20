@@ -367,9 +367,9 @@ public sealed class FlatIndex
     private void SearchQuantized(ReadOnlySpan<float> query, int limit, Span<SearchResult> results, int n)
     {
         Quantizer quantizer = Volatile.Read(ref _quantizer)!;
-        byte[] queryCode = ArrayPool<byte>.Shared.Rent(_codeLength);
+        byte[] queryCode = FaroPool<byte>.Instance.Rent(_codeLength);
         int candidateLimit = (int)Math.Min(n, (long)limit * _quantization!.RescoreFactor);
-        int[] candidateIds = ArrayPool<int>.Shared.Rent(candidateLimit);
+        int[] candidateIds = FaroPool<int>.Instance.Rent(candidateLimit);
         float[]? normalizedQuery = null;
         ulong[]? packedQuery = null;
         ReadOnlySpan<float> effective = query;
@@ -378,14 +378,14 @@ public sealed class FlatIndex
         {
             if (_normalize)
             {
-                normalizedQuery = ArrayPool<float>.Shared.Rent(_dimensions);
+                normalizedQuery = FaroPool<float>.Instance.Rent(_dimensions);
                 Distances.CopyNormalized(query, normalizedQuery.AsSpan(0, _dimensions));
                 effective = normalizedQuery.AsSpan(0, _dimensions);
             }
 
             if (_distance == Distance.Hamming)
             {
-                packedQuery = ArrayPool<ulong>.Shared.Rent(_wordsPerVector);
+                packedQuery = FaroPool<ulong>.Instance.Rent(_wordsPerVector);
                 BitVectors.PackSignBits(query, packedQuery);
             }
 
@@ -428,16 +428,16 @@ public sealed class FlatIndex
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(queryCode);
-            ArrayPool<int>.Shared.Return(candidateIds);
+            FaroPool<byte>.Instance.Return(queryCode);
+            FaroPool<int>.Instance.Return(candidateIds);
             if (normalizedQuery is not null)
             {
-                ArrayPool<float>.Shared.Return(normalizedQuery);
+                FaroPool<float>.Instance.Return(normalizedQuery);
             }
 
             if (packedQuery is not null)
             {
-                ArrayPool<ulong>.Shared.Return(packedQuery);
+                FaroPool<ulong>.Instance.Return(packedQuery);
             }
         }
     }
@@ -455,7 +455,7 @@ public sealed class FlatIndex
         ReadOnlySpan<float> effectiveQuery = query;
         if (_normalize)
         {
-            normalizedQuery = ArrayPool<float>.Shared.Rent(_dimensions);
+            normalizedQuery = FaroPool<float>.Instance.Rent(_dimensions);
             // ArrayPool returns an array at least as large as requested; CopyNormalized requires
             // an exact-length destination, so slice before handing it over.
             Distances.CopyNormalized(query, normalizedQuery.AsSpan(0, _dimensions));
@@ -465,7 +465,7 @@ public sealed class FlatIndex
         ulong[]? packedQuery = null;
         if (_distance == Distance.Hamming)
         {
-            packedQuery = ArrayPool<ulong>.Shared.Rent(_wordsPerVector);
+            packedQuery = FaroPool<ulong>.Instance.Rent(_wordsPerVector);
             BitVectors.PackSignBits(query, packedQuery);
         }
 
@@ -485,12 +485,12 @@ public sealed class FlatIndex
         {
             if (normalizedQuery is not null)
             {
-                ArrayPool<float>.Shared.Return(normalizedQuery);
+                FaroPool<float>.Instance.Return(normalizedQuery);
             }
 
             if (packedQuery is not null)
             {
-                ArrayPool<ulong>.Shared.Return(packedQuery);
+                FaroPool<ulong>.Instance.Return(packedQuery);
             }
         }
     }
@@ -500,7 +500,7 @@ public sealed class FlatIndex
         // Parallel bodies are lambdas, which cannot capture spans: copy the query into a
         // rented managed array (normalizing it first for normalized-cosine storage) and let
         // the bodies slice it. All pooled scratch is returned after Parallel.For joins.
-        var queryBuffer = ArrayPool<float>.Shared.Rent(_dimensions);
+        var queryBuffer = FaroPool<float>.Instance.Rent(_dimensions);
         if (_normalize)
         {
             Distances.CopyNormalized(query, queryBuffer.AsSpan(0, _dimensions));
@@ -513,7 +513,7 @@ public sealed class FlatIndex
         ulong[]? packedQuery = null;
         if (_distance == Distance.Hamming)
         {
-            packedQuery = ArrayPool<ulong>.Shared.Rent(_wordsPerVector);
+            packedQuery = FaroPool<ulong>.Instance.Rent(_wordsPerVector);
             BitVectors.PackSignBits(query, packedQuery);
         }
 
@@ -521,8 +521,8 @@ public sealed class FlatIndex
         int chunk = (n + partitions - 1) / partitions;
         partitions = (n + chunk - 1) / chunk;
 
-        var staging = ArrayPool<SearchResult>.Shared.Rent(partitions * limit);
-        var counts = ArrayPool<int>.Shared.Rent(partitions);
+        var staging = FaroPool<SearchResult>.Instance.Rent(partitions * limit);
+        var counts = FaroPool<int>.Instance.Rent(partitions);
         var topKOrder = TopKOrder(_distance);
         var vectors = _vectors;
         var bits = _bits;
@@ -565,14 +565,14 @@ public sealed class FlatIndex
         }
         finally
         {
-            ArrayPool<float>.Shared.Return(queryBuffer);
+            FaroPool<float>.Instance.Return(queryBuffer);
             if (packedQuery is not null)
             {
-                ArrayPool<ulong>.Shared.Return(packedQuery);
+                FaroPool<ulong>.Instance.Return(packedQuery);
             }
 
-            ArrayPool<SearchResult>.Shared.Return(staging);
-            ArrayPool<int>.Shared.Return(counts);
+            FaroPool<SearchResult>.Instance.Return(staging);
+            FaroPool<int>.Instance.Return(counts);
         }
     }
 

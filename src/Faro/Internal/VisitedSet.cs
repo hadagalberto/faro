@@ -46,7 +46,7 @@ internal ref struct VisitedSet
     public static VisitedSet Rent(int capacity)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
-        int[] stamps = ArrayPool<int>.Shared.Rent(capacity);
+        int[] stamps = FaroPool<int>.Instance.Rent(capacity);
         Array.Clear(stamps);
         return new VisitedSet(stamps, 1, rented: true);
     }
@@ -94,7 +94,7 @@ internal ref struct VisitedSet
     {
         if (_rented && _stamps.Length != 0)
         {
-            ArrayPool<int>.Shared.Return(_stamps);
+            FaroPool<int>.Instance.Return(_stamps);
         }
 
         _stamps = [];
@@ -109,10 +109,10 @@ internal ref struct VisitedSet
             return;
         }
 
-        int[] grown = ArrayPool<int>.Shared.Rent(Math.Max(needed, _stamps.Length * 2));
+        int[] grown = FaroPool<int>.Instance.Rent(Math.Max(needed, _stamps.Length * 2));
         Array.Clear(grown);
         Array.Copy(_stamps, grown, _stamps.Length);
-        ArrayPool<int>.Shared.Return(_stamps);
+        FaroPool<int>.Instance.Return(_stamps);
         _stamps = grown;
     }
 }

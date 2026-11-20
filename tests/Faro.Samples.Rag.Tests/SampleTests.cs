@@ -50,6 +50,22 @@ public sealed class SampleTests
     }
 
     [Fact]
+    public void MarkdownChunker_treatsCrLfAndLfIdentically()
+    {
+        const string lf = """
+            # Title
+
+            First substantial paragraph with enough words to become a chunk.
+
+            Second substantial paragraph with enough words to become a chunk too.
+            """;
+        string normalizedLf = lf.Replace("\r\n", "\n");
+        string crlf = normalizedLf.Replace("\n", "\r\n");
+
+        Assert.Equal(MarkdownChunker.Chunk(normalizedLf), MarkdownChunker.Chunk(crlf));
+    }
+
+    [Fact]
     public void MarkdownChunker_handlesEmptyAndLongBlocks()
     {
         Assert.Empty(MarkdownChunker.Chunk(string.Empty));

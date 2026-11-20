@@ -4,10 +4,10 @@
 
 | Layer | Project | Status | Responsibility |
 | --- | --- | --- | --- |
-| Core | `src/Faro` | Milestone 5 | Metrics, exact + HNSW indexes, quantization, payload schema/indexes, filters, planner, BM25 hybrid search, versioned single-file persistence with WAL and memory-mapped vector reads |
-| Connector | `src/Faro.VectorData` | implemented | `Microsoft.Extensions.VectorData` record definitions, LINQ filter translation, hybrid search adapter |
-| Quality gates | `tests/Faro.Tests`, `tests/Faro.RecallTests` | Milestone 5 | Equivalence, invariants, concurrency, allocations, recall (quantized and filtered), file-format round-trips and torn-WAL crash simulation |
-| Tooling | `benchmarks/Faro.Benchmarks`, `samples/Faro.Samples.Rag` | Milestone 1 | Throughput/latency measurement and an offline end-to-end sample |
+| Core | `src/Faro` | complete | Metrics, exact + HNSW indexes, quantization, payload schema/indexes, filters, planner, BM25 hybrid search, versioned single-file persistence with WAL and memory-mapped vector reads |
+| Connector | `src/Faro.VectorData` | complete | `Microsoft.Extensions.VectorData` record definitions, LINQ filter translation, hybrid search adapter |
+| Quality gates | `tests/Faro.Tests`, `tests/Faro.RecallTests` | complete | Equivalence, invariants, concurrency, allocations, recall (quantized and filtered), file-format round-trips and torn-WAL crash simulation |
+| Tooling | `benchmarks/Faro.Benchmarks`, `samples/Faro.Samples.Rag` | complete | Throughput/latency measurement and an offline end-to-end sample |
 
 The core is intentionally dependency-free (only `System.Numerics.Tensors` is allowed by SPEC, and it is not needed yet). This keeps Native AOT and trimming predictable.
 
@@ -29,6 +29,8 @@ The core is intentionally dependency-free (only `System.Numerics.Tensors` is all
 `PushBounded` replaces the root only when a candidate is worse in that order, i.e. better by the metric. Using the exact inverse including the tie direction is what keeps the lower id when equal scores straddle the k boundary.
 
 `VisitedSet` is a `ref struct` over a pooled `int[]` of generation stamps. `Reset()` increments a generation instead of clearing the array, so O(1) per search; at `int.MaxValue` it clears once and restarts at 1. Its internal constructor accepts a caller-owned array for the overflow test; `Dispose()` returns only pool-rented arrays.
+
+Every buffer is rented from `FaroPool<T>`, a private `ArrayPool<T>.Create()` instance. `ArrayPool<T>.Shared` was deliberately rejected: it registers a gen2 GC callback that trims idle buffers, so a rent after an unrelated collection can allocate a fresh array and break the steady-state guarantee. The private `ConfigurableArrayPool` never trims automatically and cannot be drained by other libraries. Buffer sizes and counts are bounded by the index configuration and every rent has a matching `finally` return, including parallel and filtered paths.
 
 ## FlatIndex
 
@@ -67,9 +69,9 @@ An index with `Quantization` stores codes alongside full vectors. The first pass
 
 `FaroDb` owns a serializer-independent `DatabaseState` that mirrors every committed collection, node and payload. Writes append a self-contained WAL record (CRC32C, Castagnoli), update the in-memory indexes and update that state. Opening reads the checkpoint, validates every page checksum, replays the WAL and truncates a torn tail. Checkpoints write a new file to `<path>.tmp`, flush, atomically rename it, reset the WAL and rebind the memory map. Stored vectors are read directly from the mapped page; vectors added since the last checkpoint use owned arrays. The in-memory graph is rebuilt from vectors and levels on open, because a WAL upsert cannot carry reciprocal link changes made to older nodes. Keys (`int`, `long`, `Guid`, `string`) are encoded independently of the payload serializer. See [file-format.md](file-format.md) for byte-level details.
 
-## Roadmap (remaining design intent)
+## Verification
 
-6. **Connector** — `Faro.VectorData` implements the current abstractions, translating the supported LINQ filter subset onto `Filter` and exposing hybrid search.
+`tests/Faro.Tests` asserts kernel equivalence, heap/visited-set invariants, HNSW degree and reachability invariants, delete/compaction behaviour, concurrency stress, WAL crash prefixes and steady-state allocations. `tests/Faro.RecallTests` gates recall against Flat ground truth; `tests/Faro.VectorData.Tests` and `tests/Faro.Samples.Rag.Tests` exercise the connector and sample end to end. Allocation tests share the non-parallel `ZeroAllocation` collection and use a common harness that warms every path with the measurement parameters and forces a gen2 collection before measuring. BenchmarkDotNet suites in `benchmarks/Faro.Benchmarks` measure kernels, Flat/HNSW insert and Flat/HNSW search with and without quantization.
 
 ## References
 

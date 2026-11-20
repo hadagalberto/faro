@@ -40,8 +40,18 @@ jobs:
         run: dotnet test Faro.sln -c Release --no-build
 
   aot-smoke:
-    name: Native AOT publish + sample smoke (linux-x64)
-    runs-on: ubuntu-latest
+    name: Native AOT publish + sample smoke (${{ matrix.rid }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            executable: Faro.Samples.Rag
+          - os: windows-latest
+            rid: win-x64
+            executable: Faro.Samples.Rag.exe
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,14 +63,17 @@ jobs:
             8.0.x
             10.0.x
 
-      - name: Install Native AOT prerequisites
+      - name: Install Native AOT prerequisites (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
 
-      - name: Publish the RAG sample with Native AOT
+      # -warnaserror plus TrimmerSingleWarn=false makes every trim/AOT warning a build failure.
+      - name: Publish the RAG sample with Native AOT (zero trim/AOT warnings)
         run: >-
           dotnet publish samples/Faro.Samples.Rag/Faro.Samples.Rag.csproj
-          -c Release -f net10.0 -r linux-x64
-          -p:PublishAot=true -warnaserror
+          -c Release -f net10.0 -r ${{ matrix.rid }}
+          -p:PublishAot=true -p:TrimmerSingleWarn=false -warnaserror
 
       - name: Run the published sample
-        run: ./samples/Faro.Samples.Rag/bin/Release/net10.0/linux-x64/publish/Faro.Samples.Rag
+        run: >-
+          ./samples/Faro.Samples.Rag/bin/Release/net10.0/${{ matrix.rid }}/publish/${{ matrix.executable }}

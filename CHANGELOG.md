@@ -6,7 +6,23 @@ All notable changes to Faro are documented here. The format follows [Keep a Chan
 
 ### Planned
 
-- `Microsoft.Extensions.VectorData` connector and integration tests.
+- Real benchmark table and remaining documentation polish.
+
+## [0.6.0] — Milestone 6
+
+### Added
+
+- `Faro.VectorData`: `FaroVectorStore` / `FaroVectorStoreCollection<TKey,TRecord>` against `Microsoft.Extensions.VectorData.Abstractions` 11.0.0, with attribute-based and explicit record definitions, generic keys, dynamic collections, embedding-generation support, record retrieval, vector search and `IKeywordHybridSearchable<TRecord>`.
+- LINQ filter translation for the supported subset (and/or/not, equality, numeric ranges, bool fields, tag/keyword `Contains`, captured variables); unsupported expressions throw instead of being ignored.
+- `FaroDb.DeleteCollection` plus WAL replay support so connector collection lifecycle operations survive reopen.
+- `FaroDbCollection<TKey,TPayload>.GetByFilter` for payload-only filtered retrieval.
+- `Faro.Samples.Rag`: offline RAG pipeline with deterministic hashing embedder, markdown chunking (including oversized-block splitting), Faro hybrid search and a source-generated payload serializer.
+- End-to-end test projects for the connector and the RAG sample.
+- Native AOT smoke publish of the RAG sample with zero trim/AOT warnings on Linux and Windows in CI.
+
+### Changed
+
+- RAG sample now uses durable collection APIs and BM25 hybrid fusion instead of a bare flat index.
 
 ## [0.5.0] — Milestone 5
 

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <OutputType>Exe</OutputType>
+    <!-- GetCollection is annotated RequiresUnreferencedCode/RequiresDynamicCode by the
+         abstractions because attribute-based model building uses reflection. These tests
+         intentionally exercise that path. -->
+    <!-- The connector tests use short-lived in-memory operations; the xUnit cancellation-token
+         analyzer is not useful here and would obscure the behaviour under test. -->
+    <NoWarn>$(NoWarn);IL2026;IL3050;xUnit1051</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" Version="4.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Faro.VectorData\Faro.VectorData.csproj" />
+  </ItemGroup>
+
+</Project>

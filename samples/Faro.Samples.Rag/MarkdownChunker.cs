@@ -76,7 +76,11 @@ public static class MarkdownChunker
                 sentenceStart = i + 1;
                 if (current.Length >= MaxChunkLength / 2)
                 {
-                    yield return current.ToString();
+                    foreach (string part in SplitOversized(current.ToString()))
+                    {
+                        yield return part;
+                    }
+
                     current.Clear();
                 }
             }
@@ -89,7 +93,42 @@ public static class MarkdownChunker
 
         if (current.Length > 0)
         {
-            yield return current.ToString();
+            foreach (string part in SplitOversized(current.ToString()))
+            {
+                yield return part;
+            }
+        }
+    }
+
+    /// <summary>Splits a sentence longer than the chunk limit on the nearest word boundary.</summary>
+    private static IEnumerable<string> SplitOversized(string text)
+    {
+        if (text.Length <= MaxChunkLength)
+        {
+            yield return text;
+            yield break;
+        }
+
+        int start = 0;
+        while (start < text.Length)
+        {
+            int end = Math.Min(start + MaxChunkLength, text.Length);
+            if (end < text.Length)
+            {
+                int searchStart = Math.Max(start + 1, end - 100);
+                int boundary = text.LastIndexOf(' ', end - 1, end - searchStart);
+                if (boundary > start)
+                {
+                    end = boundary;
+                }
+            }
+
+            yield return text[start..end].Trim();
+            start = end;
+            while (start < text.Length && text[start] == ' ')
+            {
+                start++;
+            }
         }
     }
 

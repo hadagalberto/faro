@@ -2,7 +2,7 @@
 
 **Faro** é um banco de dados vetorial embutido e sem servidor para .NET — "SQLite para embeddings". Um pacote NuGet, um arquivo em disco, kernels de distância SIMD, índice exato e (em marcos futuros) índices aproximados, além de um caminho para pipelines RAG com Semantic Kernel / Microsoft.Extensions.AI. Licença MIT, alvos `net8.0` e `net10.0`, compatível com Native AOT e trimming.
 
-> **Status — Marco 3:** além do `FlatIndex` exato e do `HnswIndex` (Algoritmo 4, construção determinística, inserts concorrentes, deletes com tombstone e `Compact()`), coleções agora podem quantizar vetores — int8 simétrico com clipping por quantil e códigos binários de sinal — com oversampling e rescore em precisão total. Os gates de recall medem `int8 + rescore(4) ≥ 0,95` e `binary + rescore(8) ≥ 0,85` em dados normalizados de 768 dimensões contra o Flat. Filtros, BM25, WAL e o conector VectorData seguem planejados; veja [docs/architecture.md](docs/architecture.md).
+> **Status — Marco 6:** Faro inclui o conector `Microsoft.Extensions.VectorData` (`VectorStore` / `VectorStoreCollection` com tradução de filtros LINQ e busca híbrida), o exemplo RAG offline com embedder determinístico local e chunking de markdown, e publicação Native AOT sem avisos no CI. O núcleo já oferece índices Flat/HNSW, quantização com rescore, filtros, BM25 híbrido e banco de dados em arquivo único com WAL CRC32C, recuperação de write truncado, checkpoints atômicos, memória mapeada, modo in-memory e chaves genéricas. Veja [docs/architecture.md](docs/architecture.md).
 
 ## Por que Faro
 
@@ -15,10 +15,10 @@ A maioria das bibliotecas HNSW para .NET entrega apenas um índice. Faro visa o 
 | Heaps e conjuntos de visitados em pool (sem alocação por busca) | ✅ | — |
 | HNSW com construção determinística, inserts concorrentes e reparo de vizinhos | ✅ | ✅ |
 | Quantização int8/binária com clipping por quantil e rescore | ✅ | — |
-| Filtros de payload com planejamento por seletividade | planejado | — |
-| BM25 + fusão RRF | planejado | — |
-| Persistência em arquivo único com WAL e recuperação | planejado | — |
-| Conector Microsoft.Extensions.VectorData | planejado | — |
+| Filtros de payload com planejamento por seletividade | ✅ | — |
+| BM25 + fusão RRF | ✅ | — |
+| Persistência em arquivo único com WAL e recuperação | ✅ | — |
+| Conector Microsoft.Extensions.VectorData (filtros LINQ, híbrido) | ✅ | — |
 
 ## Início rápido
 

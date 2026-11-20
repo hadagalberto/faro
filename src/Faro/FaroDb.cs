@@ -244,6 +244,41 @@ public sealed class FaroDb : IDisposable, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Deletes a collection and all of its records. The removal is written to the WAL so it
+    /// survives a reopen; a subsequent checkpoint drops the collection from the main file.
+    /// </summary>
+    /// <param name="name">The collection name.</param>
+    /// <returns><see langword="true"/> when a collection was removed.</returns>
+    public bool DeleteCollection(string name)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ThrowIfDisposed();
+
+        lock (_collectionGate)
+        {
+            _gate.EnterWriteLock();
+            try
+            {
+                if (!_state.TryGet(name, out CollectionState? state))
+                {
+                    _collections.Remove(name);
+                    return false;
+                }
+
+                int id = state!.Definition.Id;
+                _collections.Remove(name);
+                _state.Remove(id);
+                AppendDeleteCollection(id);
+                return true;
+            }
+            finally
+            {
+                _gate.ExitWriteLock();
+            }
+        }
+    }
+
     /// <summary>Flushes pending WAL records according to the configured durability mode.</summary>
     public void Flush()
     {
@@ -359,6 +394,18 @@ public sealed class FaroDb : IDisposable, IAsyncDisposable
         _wal.Append(1, payload);
     }
 
+    private void AppendDeleteCollection(int collectionId)
+    {
+        if (_wal is null)
+        {
+            return;
+        }
+
+        var payload = new ByteWriter();
+        payload.WriteInt32(collectionId);
+        _wal.Append(4, payload);
+    }
+
     private void Replay(WalReplay replay)
     {
         foreach (WalRecord record in replay.Records)
@@ -403,6 +450,16 @@ public sealed class FaroDb : IDisposable, IAsyncDisposable
                             state!.ApplyDelete(nodeId);
                         }
 
+                        break;
+                    }
+
+                    case 4:
+                    {
+                        // Collection deletion. Upserts replayed before this record for the same id
+                        // are discarded with the collection state; later ones are ignored because
+                        // the id no longer exists.
+                        int collectionId = reader.ReadInt32();
+                        _state.Remove(collectionId);
                         break;
                     }
 

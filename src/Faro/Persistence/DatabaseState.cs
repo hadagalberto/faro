@@ -164,6 +164,22 @@ internal sealed class DatabaseState
         }
     }
 
+    /// <summary>Removes a collection by id, returning its definition when it existed.</summary>
+    internal CollectionDefinition? Remove(int id)
+    {
+        lock (_gate)
+        {
+            if (!_byId.TryGetValue(id, out CollectionState? state))
+            {
+                return null;
+            }
+
+            _byId.Remove(id);
+            _byName.Remove(state.Definition.Name);
+            return state.Definition;
+        }
+    }
+
     internal bool TryGet(int id, out CollectionState? state)
     {
         lock (_gate)

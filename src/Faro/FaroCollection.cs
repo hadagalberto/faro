@@ -182,6 +182,12 @@ public sealed class FaroCollection<T>
     /// <returns><see langword="true"/> when the id has a payload.</returns>
     public bool TryGetPayload(int id, out T? payload) => _payloads.TryGetPayload(id, out payload);
 
+    /// <summary>Validates that every field referenced by a filter is declared in this schema.</summary>
+    internal void ValidateFilterFields(Filter filter) => _payloads.ValidateFields(filter);
+
+    /// <summary>Returns the exact candidate id set of a filter, using the payload indexes.</summary>
+    internal HashSet<int> EvaluateFilter(Filter filter) => _payloads.Evaluate(filter);
+
     /// <summary>Searches by vector, optionally restricted by a payload filter.</summary>
     /// <param name="query">The query vector.</param>
     /// <param name="k">Maximum number of hits.</param>

@@ -209,6 +209,38 @@ public class FaroDbCollection<TKey, TPayload> : IPersistedCollection
         return _keyToId.ContainsKey(key);
     }
 
+    /// <summary>
+    /// Retrieves records by payload filter alone, without a vector query. Uses the same payload
+    /// indexes as filtered search, so the result is the exact candidate set of the filter.
+    /// </summary>
+    /// <param name="filter">The filter to evaluate.</param>
+    /// <param name="top">Maximum number of records to return.</param>
+    /// <returns>Key/payload pairs ordered by internal id for deterministic results.</returns>
+    public IReadOnlyList<(TKey Key, TPayload Payload)> GetByFilter(Filter filter, int top)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(top);
+
+        _collection.ValidateFilterFields(filter);
+        int[] ids = _collection.EvaluateFilter(filter).ToArray();
+        Array.Sort(ids);
+        var results = new List<(TKey, TPayload)>(Math.Min(ids.Length, top));
+        foreach (int id in ids)
+        {
+            if (results.Count >= top)
+            {
+                break;
+            }
+
+            if (_idToKey.TryGetValue(id, out TKey? key) && _collection.TryGetPayload(id, out TPayload? payload) && payload is not null)
+            {
+                results.Add((key, payload));
+            }
+        }
+
+        return results;
+    }
+
     /// <summary>Searches by vector, optionally restricted by a payload filter.</summary>
     /// <param name="query">The query vector.</param>
     /// <param name="k">Maximum number of hits.</param>

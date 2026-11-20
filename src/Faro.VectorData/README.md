@@ -1,13 +1,23 @@
 # Faro.VectorData
 
-Connector over the [`Microsoft.Extensions.VectorData`](https://learn.microsoft.com/dotnet/api/microsoft.extensions.vectordata)
-abstractions (`IVectorStore` / `IVectorStoreCollection<TKey, TRecord>` / keyword hybrid search)
-so Faro can be used directly from Semantic Kernel and Microsoft.Extensions.AI pipelines.
+Connector for [`Microsoft.Extensions.VectorData.Abstractions`](https://www.nuget.org/packages/Microsoft.Extensions.VectorData.Abstractions)
+11.0.0 (latest stable). It maps the abstractions' record model onto Faro collections so Faro can
+be used from Semantic Kernel / Microsoft.Extensions.AI pipelines.
 
-**Status:** this project is scaffolded per the SPEC solution layout and carries the package
-reference (`Microsoft.Extensions.VectorData.Abstractions`, latest stable) and the project
-reference to `Faro`. The connector implementation lands with the SPEC §8 milestone
-(VectorStore + VectorStoreCollection with record definitions, LINQ-expression-to-Faro filter
-translation for the supported subset, and hybrid search where the abstraction provides it),
-because it requires the payload/filter/hybrid search surface of the completed core
-(collection schema, filters, BM25, persistence) to bind against — not a partial approximation.
+## What is implemented
+
+- `FaroVectorStore` over an existing `FaroDb`, a `.faro` file, or an in-memory database.
+- `FaroVectorStoreCollection<TKey,TRecord>` with CRUD, batch upsert, filtered retrieval, vector
+  search (`SearchAsync`) and keyword hybrid search (`IKeywordHybridSearchable<TRecord>`).
+- Schemas from `[VectorStoreKey]` / `[VectorStoreData]` / `[VectorStoreVector]` attributes or from
+  an explicit `VectorStoreCollectionDefinition`; dynamic dictionary records are supported too.
+- LINQ filter translation for `&&`, `||`, `!`, equality/inequality, numeric ranges, bare bool
+  fields and `Contains` on tag/keyword fields (both directions). Captured variables are inlined by
+  the abstractions' preprocessing visitor. Unsupported expressions throw `NotSupportedException`.
+- AOT-safe payload persistence through a caller-supplied source-generated JSON context or explicit
+  `IPayloadSerializer<TRecord>` registration.
+
+See the root [README](../../README.md#microsoftextensionsvectordata) for a usage example and the
+supported-subset notes. `GetCollection` carries the abstractions' `RequiresDynamicCode` /
+`RequiresUnreferencedCode` annotations; trimmed applications should use `GetDynamicCollection` with
+an explicit definition and a registered serializer.

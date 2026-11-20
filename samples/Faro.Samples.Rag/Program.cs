@@ -1,49 +1,21 @@
-using Faro;
-
 namespace Faro.Samples.Rag;
 
 /// <summary>
-/// A miniature RAG pipeline: chunk markdown documents, embed each chunk with a deterministic
-/// local hashing embedder (no network), index the embeddings in Faro and run exact semantic
-/// search over them. Keyword/BM25 hybrid fusion arrives with the full-text search milestone;
-/// this milestone exercises the storage and search path end to end.
+/// A miniature offline RAG pipeline: chunk markdown, embed with a deterministic local hashing
+/// embedder, index in Faro and run vector + BM25 hybrid search. No network and no server.
 /// </summary>
 public static class Program
 {
-    private const int EmbeddingDimensions = 256;
     private const int TopK = 3;
 
     public static int Main(string[] args)
     {
-        var documents = LoadDocuments(args);
-        var embedder = new HashingEmbedder(EmbeddingDimensions);
+        IReadOnlyList<(string Title, string Markdown)> documents = LoadDocuments(args);
+        using var pipeline = new RagPipeline();
+        int indexed = pipeline.Index(documents);
 
-        var index = new FlatIndex(new FlatOptions
-        {
-            Dimensions = EmbeddingDimensions,
-            Distance = Distance.Cosine,
-        });
-
-        var chunkTitles = new List<string>();
-        var chunkPreviews = new List<string>();
-        foreach (var (title, markdown) in documents)
-        {
-            foreach (var chunk in MarkdownChunker.Chunk(markdown))
-            {
-                int id = index.Add(embedder.Embed(chunk));
-                while (chunkTitles.Count <= id)
-                {
-                    chunkTitles.Add(string.Empty);
-                    chunkPreviews.Add(string.Empty);
-                }
-
-                chunkTitles[id] = title;
-                chunkPreviews[id] = chunk.Length <= 110 ? chunk : chunk[..110] + "…";
-            }
-        }
-
-        Console.WriteLine($"Indexed {chunkTitles.Count} chunks from {documents.Count} documents " +
-                          $"({EmbeddingDimensions}-d hashing embeddings, {Distance.Cosine} distance).");
+        Console.WriteLine($"Indexed {indexed} chunks from {documents.Count} documents " +
+                          "(256-d deterministic hashing embeddings, cosine distance, BM25 hybrid fusion).");
         Console.WriteLine();
 
         string[] queries =
@@ -52,16 +24,17 @@ public static class Program
             "what ranking formula does full text search use",
             "how can embeddings be compressed to one bit per dimension",
             "an embedded database that plugs into semantic kernel",
-            "the great wall of china", // off-corpus query: farthest chunks rank last
+            "the great wall of china", // off-corpus query: retrieval should be weak
         ];
 
-        foreach (var query in queries)
+        foreach (string query in queries)
         {
             Console.WriteLine($"query: \"{query}\"");
-            var hits = index.Search(embedder.Embed(query), TopK);
-            foreach (var hit in hits)
+            foreach (RagSearchResult result in pipeline.Search(query, TopK))
             {
-                Console.WriteLine($"  score {hit.Score,7:F4}  {chunkTitles[hit.Id],20}  {chunkPreviews[hit.Id]}");
+                string preview = result.Text.Length <= 100 ? result.Text : result.Text[..100] + "…";
+                Console.WriteLine($"  rrf {result.Score,6:F4}  vec {result.VectorScore,7:F4}  " +
+                                  $"bm25 {result.TextScore,6:F3}  {result.Title,-22}  {preview}");
             }
 
             Console.WriteLine();
@@ -75,11 +48,12 @@ public static class Program
         if (args.Length > 0 && Directory.Exists(args[0]))
         {
             var loaded = new List<(string, string)>();
-            foreach (var path in Directory.EnumerateFiles(args[0], "*.md"))
+            foreach (string path in Directory.EnumerateFiles(args[0], "*.md"))
             {
                 loaded.Add((Path.GetFileName(path), File.ReadAllText(path)));
             }
 
+            loaded.Sort(static (left, right) => StringComparer.Ordinal.Compare(left.Item1, right.Item1));
             if (loaded.Count > 0)
             {
                 return loaded;

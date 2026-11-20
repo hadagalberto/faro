@@ -3,6 +3,10 @@
   <PropertyGroup>
     <Description>Faro connector for Microsoft.Extensions.VectorData &#8212; plugs Faro into Semantic Kernel / Microsoft.Extensions.AI RAG pipelines.</Description>
     <IsPackable>true</IsPackable>
+    <!-- The provider-side model/filter support types of VectorData.Abstractions 11 are marked
+         [Experimental(MEVD9001)]. Faro is a provider, so using them is intentional; the diagnostic
+         is suppressed only in this project. -->
+    <NoWarn>$(NoWarn);MEVD9001</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

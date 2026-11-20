@@ -2,7 +2,7 @@
 
 **Faro** is an embedded, zero-server vector database for .NET — "SQLite for embeddings". One NuGet package, one file on disk, SIMD distance kernels, exact and approximate indexes, and a path into Semantic Kernel / Microsoft.Extensions.AI RAG pipelines. MIT licensed, targets `net8.0` and `net10.0`, and is built to be Native AOT and trimming compatible.
 
-> **Status — Milestone 5:** on top of exact/HNSW indexes, quantization with rescoring, typed payloads, filters and BM25 hybrid search, `FaroDb` now provides a versioned single-file format, a CRC32C write-ahead log with configurable durability, torn-tail crash recovery, atomic checkpoints, memory-mapped vector reads, in-memory mode, generic keys and sync/async batch APIs. The `Microsoft.Extensions.VectorData` connector is still planned; see [docs/architecture.md](docs/architecture.md).
+> **Status — Milestone 6:** Faro now includes the `Microsoft.Extensions.VectorData` connector (`VectorStore` / `VectorStoreCollection` with LINQ filter translation and keyword hybrid search), an offline markdown RAG sample with a deterministic local hashing embedder, and a Native AOT publish that is warning-free in CI. The core already provides exact/HNSW indexes, quantization with rescoring, typed payloads, filters, BM25 hybrid search, and a versioned single-file database with CRC32C WAL, torn-tail recovery, atomic checkpoints, memory mapping, in-memory mode and generic keys. See [docs/architecture.md](docs/architecture.md).
 
 ## Why Faro
 
@@ -18,7 +18,7 @@ Most .NET HNSW packages hand you a bare index. Faro aims at the complete databas
 | Payload filters with selectivity-aware planning | ✅ | — |
 | BM25 full-text + RRF hybrid search | ✅ | — |
 | Single-file persistence with CRC32C WAL + crash recovery | ✅ | — |
-| Microsoft.Extensions.VectorData connector | planned | — |
+| Microsoft.Extensions.VectorData connector (LINQ filters, hybrid) | ✅ | — |
 
 ## Quick start
 
@@ -141,6 +141,54 @@ HybridResult[] hybrid = docs.HybridSearch(
 
 Filters are immutable and composable with `&`, `|` and `!`. The planner estimates selectivity from the payload indexes: a filter matching few vectors is scored exactly over its candidate ids; a broad filter traverses the HNSW graph with the predicate applied during traversal and an adaptive beam (`baseEf / selectivity`, capped). BM25 tokenization normalizes Unicode, folds accents ("ação" matches "acao") and removes English/Portuguese stopwords. Fusion is reciprocal rank fusion (Cormack et al., 2009) or min-max normalized weighted score fusion.
 
+## Microsoft.Extensions.VectorData
+
+`Faro.VectorData` targets the latest stable `Microsoft.Extensions.VectorData.Abstractions` (11.x). It implements `VectorStore`, `VectorStoreCollection<TKey,TRecord>` and `IKeywordHybridSearchable<TRecord>`, so Faro can be used from Semantic Kernel / Microsoft.Extensions.AI pipelines. Record schemas come from the standard key/data/vector attributes or an explicit `VectorStoreCollectionDefinition`.
+
+```csharp
+using Faro.VectorData;
+using Microsoft.Extensions.VectorData;
+
+[JsonSerializable(typeof(Article))]
+internal sealed partial class ArticleContext : JsonSerializerContext { }
+
+public sealed class Article
+{
+    [VectorStoreKey] public string Id { get; set; } = "";
+    [VectorStoreData(IsIndexed = true)] public string Tenant { get; set; } = "";
+    [VectorStoreData(IsIndexed = true)] public int Year { get; set; }
+    [VectorStoreData(IsIndexed = true)] public string[] Tags { get; set; } = [];
+    [VectorStoreData(IsFullTextIndexed = true)] public string Text { get; set; } = "";
+    [VectorStoreVector(768, DistanceFunction = DistanceFunction.CosineSimilarity)]
+    public float[] Vector { get; set; } = [];
+}
+
+using var store = FaroVectorStore.InMemory(new FaroVectorStoreOptions
+{
+    JsonSerializerContext = ArticleContext.Default,
+});
+var articles = store.GetCollection<string, Article>("articles");
+
+await articles.UpsertAsync(article);
+await foreach (var result in articles.SearchAsync(queryEmbedding, 10, new VectorSearchOptions<Article>
+{
+    Filter = a => a.Tenant == "acme" && a.Year >= 2020 && a.Tags.Contains("rag"),
+}))
+{
+    Console.WriteLine(result.Record.Id);
+}
+
+var hybrid = (IKeywordHybridSearchable<Article>)articles;
+await foreach (var result in hybrid.HybridSearchAsync(queryEmbedding, ["ação", "rag"], 10))
+{
+    Console.WriteLine(result.Record.Id);
+}
+```
+
+The LINQ translator supports `&&`, `||`, `!`, equality/inequality, numeric ranges, bare bool fields and `Contains` on tag/keyword fields (in either direction), with captured values inlined by the abstractions' preprocessing visitor. Unsupported expressions throw `NotSupportedException` instead of being silently ignored.
+
+`GetCollection` carries the abstractions' `RequiresDynamicCode` / `RequiresUnreferencedCode` annotations because attribute-based model building uses reflection. For fully trimmed applications use `GetDynamicCollection` with an explicit definition and a registered payload serializer.
+
 ## Database, persistence and durability
 
 `FaroDb` is the database layer around the indexes. One call opens (or creates) a `.faro` checkpoint plus its `.faro.wal` log; `FaroDb.InMemory()` gives the same API with no files.
@@ -221,17 +269,19 @@ The sample publishes with Native AOT and no trim/AOT warnings:
 dotnet publish samples/Faro.Samples.Rag -c Release -f net10.0 -r <rid> -p:PublishAot=true
 ```
 
-CI performs this publish and runs the produced binary on `linux-x64`.
+CI performs this publish with `-p:TrimmerSingleWarn=false -warnaserror` and runs the produced binary on both `linux-x64` and `win-x64`.
 
 ## Repository layout
 
 ```
-src/Faro/                    core: distances, Flat index, pooled search structures
-src/Faro.VectorData/         Microsoft.Extensions.VectorData connector (planned)
+src/Faro/                    core: distances, Flat/HNSW indexes, payloads, filtering, BM25, persistence
+src/Faro.VectorData/         Microsoft.Extensions.VectorData.Abstractions connector
 tests/Faro.Tests/            unit, equivalence, concurrency and allocation tests
 tests/Faro.RecallTests/      recall/quality gates (Flat ground truth)
+tests/Faro.VectorData.Tests/ end-to-end connector, LINQ filter and hybrid tests
+tests/Faro.Samples.Rag.Tests/ embedder, chunker and RAG pipeline tests
 benchmarks/Faro.Benchmarks/  BenchmarkDotNet suites
-samples/Faro.Samples.Rag/    offline markdown RAG sample
+samples/Faro.Samples.Rag/    offline markdown RAG sample (hashing embedder + hybrid search)
 docs/                        architecture, file format, tuning
 ```
 

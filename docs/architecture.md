@@ -5,7 +5,7 @@
 | Layer | Project | Status | Responsibility |
 | --- | --- | --- | --- |
 | Core | `src/Faro` | Milestone 5 | Metrics, exact + HNSW indexes, quantization, payload schema/indexes, filters, planner, BM25 hybrid search, versioned single-file persistence with WAL and memory-mapped vector reads |
-| Connector | `src/Faro.VectorData` | planned | `Microsoft.Extensions.VectorData` record definitions, LINQ filter translation, hybrid search adapter |
+| Connector | `src/Faro.VectorData` | implemented | `Microsoft.Extensions.VectorData` record definitions, LINQ filter translation, hybrid search adapter |
 | Quality gates | `tests/Faro.Tests`, `tests/Faro.RecallTests` | Milestone 5 | Equivalence, invariants, concurrency, allocations, recall (quantized and filtered), file-format round-trips and torn-WAL crash simulation |
 | Tooling | `benchmarks/Faro.Benchmarks`, `samples/Faro.Samples.Rag` | Milestone 1 | Throughput/latency measurement and an offline end-to-end sample |
 

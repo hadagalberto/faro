@@ -1,4 +1,5 @@
-using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
@@ -47,7 +48,7 @@ internal static class VectorKernels
     /// <summary>Returns the naive scalar inner product, accumulated in double precision.</summary>
     public static float DotScalar(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         double sum = 0;
         for (int i = 0; i < a.Length; i++)
@@ -61,7 +62,7 @@ internal static class VectorKernels
     /// <summary>Inner product computed with 128-bit vectors.</summary>
     public static float DotV128(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -96,7 +97,7 @@ internal static class VectorKernels
     /// <summary>Inner product computed with 256-bit vectors.</summary>
     public static float DotV256(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -131,7 +132,7 @@ internal static class VectorKernels
     /// <summary>Inner product computed with 512-bit vectors.</summary>
     public static float DotV512(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -313,7 +314,7 @@ internal static class VectorKernels
     /// <summary>Returns the naive scalar squared L2 distance, accumulated in double precision.</summary>
     public static float EuclideanSquaredScalar(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         double sum = 0;
         for (int i = 0; i < a.Length; i++)
@@ -328,7 +329,7 @@ internal static class VectorKernels
     /// <summary>Squared L2 distance computed with 128-bit vectors.</summary>
     public static float EuclideanSquaredV128(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -363,7 +364,7 @@ internal static class VectorKernels
     /// <summary>Squared L2 distance computed with 256-bit vectors.</summary>
     public static float EuclideanSquaredV256(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -398,7 +399,7 @@ internal static class VectorKernels
     /// <summary>Squared L2 distance computed with 512-bit vectors.</summary>
     public static float EuclideanSquaredV512(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -455,4 +456,19 @@ internal static class VectorKernels
 
         return 1f - cos;
     }
+
+    // Debug.Assert disappears in Release, but LoadUnsafe reads full vectors from raw pointers: a
+    // mismatched length is a memory-safety bug even for internal callers, so validate at runtime.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void RequireSameLength(int left, int right)
+    {
+        if (left != right)
+        {
+            ThrowLengthMismatch(left, right);
+        }
+    }
+
+    [DoesNotReturn]
+    private static void ThrowLengthMismatch(int left, int right) =>
+        throw new ArgumentException($"vectors must have the same length, got {left} and {right}.");
 }

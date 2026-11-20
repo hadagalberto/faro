@@ -30,7 +30,9 @@ internal sealed class CheckpointData
 /// <remarks>
 /// A checkpoint is always written to a temporary file, flushed, then atomically renamed over the
 /// main file. The header is filled last so a partially written file is never mistaken for a
-/// committed checkpoint. Every page carries its own CRC32C; a page with a bad checksum is ignored.
+/// committed checkpoint. Every page carries its own CRC32C; a page with a bad checksum or an
+/// out-of-range position is corruption and raises <see cref="FaroCorruptionException"/> unless the
+/// caller explicitly opts into salvage (see <see cref="CheckpointRecovery"/>).
 /// </remarks>
 internal static class Checkpoint
 {
@@ -159,30 +161,46 @@ internal static class Checkpoint
         File.Move(temporary, path, overwrite: true);
     }
 
-    /// <summary>Reads and validates a checkpoint file. A missing or invalid file yields empty state.</summary>
-    internal static CheckpointData Read(string path)
+    /// <summary>
+    /// Reads and validates a checkpoint file. Pages are read individually with <see cref="long"/>
+    /// offsets so files larger than 2 GB can be opened. A missing file yields empty state; a bad
+    /// header is an <see cref="InvalidDataException"/>; a damaged page is
+    /// <see cref="FaroCorruptionException"/> unless salvage was explicitly requested.
+    /// </summary>
+    internal static CheckpointData Read(string path, CheckpointRecovery recovery, CorruptionReport report)
     {
         if (!File.Exists(path))
         {
             return new CheckpointData(0, [], [], []);
         }
 
-        byte[] bytes = File.ReadAllBytes(path);
-        if (bytes.Length < HeaderSize ||
-            !bytes.AsSpan(0, Magic.Length).SequenceEqual(Magic) ||
-            BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4, 4)) != Version ||
-            BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8, 4)) != HeaderSize ||
-            BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(64, 4)) != Crc32C.Compute(bytes.AsSpan(0, 64)))
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+            bufferSize: 1, FileOptions.RandomAccess);
+        long fileLength = stream.Length;
+        if (fileLength < HeaderSize)
         {
             throw new InvalidDataException("not a supported Faro checkpoint (bad header or version)");
         }
 
-        long tableOffset = BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(32, 8));
-        int pageCount = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(40, 4)));
-        if (tableOffset < HeaderSize || pageCount < 0 || tableOffset + (long)pageCount * PageRecordSize > bytes.Length)
+        byte[] header = ReadRange(stream, 0, HeaderSize, fileLength, "checkpoint header");
+        if (!header.AsSpan(0, Magic.Length).SequenceEqual(Magic) ||
+            BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(4, 4)) != Version ||
+            BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(8, 4)) != HeaderSize ||
+            BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(64, 4)) != Crc32C.Compute(header.AsSpan(0, 64)))
+        {
+            throw new InvalidDataException("not a supported Faro checkpoint (bad header or version)");
+        }
+
+        long tableOffset = BinaryPrimitives.ReadInt64LittleEndian(header.AsSpan(32, 8));
+        long pageCount64 = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(40, 4));
+        if (tableOffset < HeaderSize || tableOffset > fileLength ||
+            pageCount64 > (fileLength - tableOffset) / PageRecordSize || pageCount64 > int.MaxValue)
         {
             throw new InvalidDataException("invalid checkpoint page table");
         }
+
+        int pageCount = (int)pageCount64;
+        byte[] table = ReadRange(stream, tableOffset, checked((int)(pageCount * PageRecordSize)), fileLength, "page table");
 
         var definitions = new Dictionary<int, CollectionDefinition>();
         var vectors = new Dictionary<int, List<PersistedNode>>();
@@ -191,22 +209,35 @@ internal static class Checkpoint
 
         for (int i = 0; i < pageCount; i++)
         {
-            int entry = checked((int)tableOffset) + i * PageRecordSize;
-            byte kind = bytes[entry];
-            int collectionId = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(entry + 4, 4));
-            long offset = BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(entry + 8, 8));
-            long length = BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(entry + 16, 8));
-            uint checksum = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(entry + 24, 4));
+            int entry = i * PageRecordSize;
+            byte kind = table[entry];
+            int collectionId = BinaryPrimitives.ReadInt32LittleEndian(table.AsSpan(entry + 4, 4));
+            long offset = BinaryPrimitives.ReadInt64LittleEndian(table.AsSpan(entry + 8, 8));
+            long length = BinaryPrimitives.ReadInt64LittleEndian(table.AsSpan(entry + 16, 8));
+            uint checksum = BinaryPrimitives.ReadUInt32LittleEndian(table.AsSpan(entry + 24, 4));
 
-            if (length < 0 || offset < HeaderSize || offset > bytes.Length - length)
+            bool outOfBounds = length < 0 || length > int.MaxValue || offset < HeaderSize || offset > fileLength - length;
+            if (outOfBounds)
             {
-                continue; // a page outside the file is treated as absent
+                Corrupt(kind, collectionId, offset, length, "page lies outside the checkpoint file", recovery, report);
+                continue;
             }
 
-            ReadOnlyMemory<byte> page = new ReadOnlyMemory<byte>(bytes, checked((int)offset), checked((int)length));
-            if (Crc32C.Compute(page.Span) != checksum)
+            byte[] page;
+            try
             {
-                continue; // CRC failure: page is absent (torn or corrupt)
+                page = ReadRange(stream, offset, (int)length, fileLength, "checkpoint page");
+            }
+            catch (InvalidDataException error)
+            {
+                Corrupt(kind, collectionId, offset, length, "page is truncated: " + error.Message, recovery, report);
+                continue;
+            }
+
+            if (Crc32C.Compute(page) != checksum)
+            {
+                Corrupt(kind, collectionId, offset, length, "bad CRC32C checksum", recovery, report);
+                continue;
             }
 
             var reader = new ByteReader(page);
@@ -238,9 +269,9 @@ internal static class Checkpoint
                         break;
                 }
             }
-            catch (InvalidDataException)
+            catch (InvalidDataException error)
             {
-                // A malformed but CRC-valid page behaves like an absent page.
+                Corrupt(kind, collectionId, offset, length, "malformed page: " + error.Message, recovery, report);
             }
         }
 
@@ -273,7 +304,7 @@ internal static class Checkpoint
         }
 
         return new CheckpointData(
-            BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(16, 8)),
+            BinaryPrimitives.ReadUInt64LittleEndian(header.AsSpan(16, 8)),
             definitions,
             nodes,
             records);
@@ -283,7 +314,8 @@ internal static class Checkpoint
     /// Locates every stored vector blob in the checkpoint file. The returned offsets are absolute
     /// file positions and are used to index directly into the memory-mapped vector pages.
     /// </summary>
-    internal static Dictionary<int, Dictionary<int, long>> ReadVectorOffsets(string path)
+    internal static Dictionary<int, Dictionary<int, long>> ReadVectorOffsets(
+        string path, CheckpointRecovery recovery, CorruptionReport report)
     {
         var result = new Dictionary<int, Dictionary<int, long>>();
         if (!File.Exists(path))
@@ -291,44 +323,64 @@ internal static class Checkpoint
             return result;
         }
 
-        byte[] bytes = File.ReadAllBytes(path);
-        if (bytes.Length < HeaderSize ||
-            !bytes.AsSpan(0, Magic.Length).SequenceEqual(Magic) ||
-            BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4, 4)) != Version ||
-            BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8, 4)) != HeaderSize ||
-            BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(64, 4)) != Crc32C.Compute(bytes.AsSpan(0, 64)))
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+            bufferSize: 1, FileOptions.RandomAccess);
+        long fileLength = stream.Length;
+        if (fileLength < HeaderSize)
         {
             return result;
         }
 
-        long tableOffset = BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(32, 8));
-        int pageCount = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(40, 4)));
-        if (tableOffset < HeaderSize || pageCount < 0 || tableOffset + (long)pageCount * PageRecordSize > bytes.Length)
+        byte[] header = ReadRange(stream, 0, HeaderSize, fileLength, "checkpoint header");
+        if (!header.AsSpan(0, Magic.Length).SequenceEqual(Magic) ||
+            BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(4, 4)) != Version ||
+            BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(8, 4)) != HeaderSize ||
+            BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(64, 4)) != Crc32C.Compute(header.AsSpan(0, 64)))
         {
             return result;
         }
 
-        for (int i = 0; i < pageCount; i++)
+        long tableOffset = BinaryPrimitives.ReadInt64LittleEndian(header.AsSpan(32, 8));
+        long pageCount64 = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(40, 4));
+        if (tableOffset < HeaderSize || tableOffset > fileLength ||
+            pageCount64 > (fileLength - tableOffset) / PageRecordSize || pageCount64 > int.MaxValue)
         {
-            int entry = checked((int)tableOffset) + i * PageRecordSize;
-            if (bytes[entry] != PageVector)
+            return result;
+        }
+
+        byte[] table = ReadRange(stream, tableOffset, checked((int)(pageCount64 * PageRecordSize)), fileLength, "page table");
+        for (int i = 0; i < (int)pageCount64; i++)
+        {
+            int entry = i * PageRecordSize;
+            if (table[entry] != PageVector)
             {
                 continue;
             }
 
-            int collectionId = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(entry + 4, 4));
-            long offset = BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(entry + 8, 8));
-            long length = BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(entry + 16, 8));
-            uint checksum = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(entry + 24, 4));
-            if (length < 0 || offset < HeaderSize || offset > bytes.Length - length)
+            int collectionId = BinaryPrimitives.ReadInt32LittleEndian(table.AsSpan(entry + 4, 4));
+            long offset = BinaryPrimitives.ReadInt64LittleEndian(table.AsSpan(entry + 8, 8));
+            long length = BinaryPrimitives.ReadInt64LittleEndian(table.AsSpan(entry + 16, 8));
+            uint checksum = BinaryPrimitives.ReadUInt32LittleEndian(table.AsSpan(entry + 24, 4));
+            if (length < 0 || length > int.MaxValue || offset < HeaderSize || offset > fileLength - length)
             {
+                Corrupt(PageVector, collectionId, offset, length, "page lies outside the checkpoint file", recovery, report);
                 continue;
             }
 
-            int pageStart = checked((int)offset);
-            ReadOnlyMemory<byte> page = new(bytes, pageStart, checked((int)length));
-            if (Crc32C.Compute(page.Span) != checksum)
+            byte[] page;
+            try
             {
+                page = ReadRange(stream, offset, (int)length, fileLength, "vector page");
+            }
+            catch (InvalidDataException error)
+            {
+                Corrupt(PageVector, collectionId, offset, length, "page is truncated: " + error.Message, recovery, report);
+                continue;
+            }
+
+            if (Crc32C.Compute(page) != checksum)
+            {
+                Corrupt(PageVector, collectionId, offset, length, "bad CRC32C checksum", recovery, report);
                 continue;
             }
 
@@ -338,7 +390,7 @@ internal static class Checkpoint
                 int count = reader.ReadInt32();
                 if (count < 0 || count > 50_000_000)
                 {
-                    continue;
+                    throw new InvalidDataException("invalid vector page count");
                 }
 
                 var offsets = new Dictionary<int, long>();
@@ -353,19 +405,66 @@ internal static class Checkpoint
                         throw new InvalidDataException("invalid vector page entry");
                     }
 
-                    offsets[id] = pageStart + reader.Position;
+                    offsets[id] = offset + reader.Position;
                     _ = reader.ReadRaw(vectorLength);
                 }
 
                 result[collectionId] = offsets;
             }
-            catch (InvalidDataException)
+            catch (InvalidDataException error)
             {
-                // Ignore a malformed vector page; its nodes fall back to in-memory data.
+                Corrupt(PageVector, collectionId, offset, length, "malformed vector page: " + error.Message, recovery, report);
             }
         }
 
         return result;
+    }
+
+    /// <summary>Reads an exact range using a 64-bit file position (no byte[] of the whole file).</summary>
+    private static byte[] ReadRange(FileStream stream, long offset, int length, long fileLength, string what)
+    {
+        if (offset < 0 || length < 0 || offset > fileLength - length)
+        {
+            throw new InvalidDataException($"{what} lies outside the checkpoint file");
+        }
+
+        var bytes = new byte[length];
+        stream.Position = offset;
+        int read = 0;
+        while (read < length)
+        {
+            int count = stream.Read(bytes, read, length - read);
+            if (count == 0)
+            {
+                throw new InvalidDataException($"{what} is truncated");
+            }
+
+            read += count;
+        }
+
+        return bytes;
+    }
+
+    /// <summary>Fails loudly by default; in salvage mode records what was skipped and continues.</summary>
+    private static void Corrupt(
+        byte kind, int collectionId, long offset, long length, string reason,
+        CheckpointRecovery recovery, CorruptionReport report)
+    {
+        report.Add(kind, collectionId, offset, length, reason);
+        if (recovery == CheckpointRecovery.Fail)
+        {
+            string name = kind switch
+            {
+                PageCollectionDef => "collection-definition",
+                PageVector => "vector",
+                PageGraph => "graph",
+                PagePayload => "payload",
+                PageText => "text",
+                _ => $"unknown({kind})",
+            };
+            throw new FaroCorruptionException(
+                $"checkpoint {name} page (kind {kind}) of collection {collectionId} at offset {offset} (length {length}): {reason}");
+        }
     }
 
     private static int ExpectedVectorBytes(CollectionDefinition definition) =>

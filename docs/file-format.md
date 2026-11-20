@@ -40,7 +40,7 @@ All integers are little-endian. Padding bytes are zero. Checkpoints are built in
 | 64 | 4 | CRC32C over bytes `[0,64)` |
 | 68 | 60 | Reserved (zero) |
 
-A missing file, a bad magic/version/header size or a header checksum mismatch raises `InvalidDataException` on open. A valid file with a bad page checksum simply treats that page as absent.
+A missing file, a bad magic/version/header size or a header checksum mismatch raises `InvalidDataException` on open. A valid file whose page has a bad checksum, an out-of-range offset/length, or a malformed but CRC-valid body raises `FaroCorruptionException` — it is never silently treated as absent. `FaroDb.OpenWithRecovery` (or `FaroOptions.Recovery = CheckpointRecovery.Salvage`) opts in to skipping damaged pages and reports every skipped region on `FaroDb.RecoveryReport`; the original files are not rewritten by that open. Offsets are read as 64-bit values from a stream, so files larger than 2 GB are supported.
 
 ## Page table
 
@@ -66,7 +66,7 @@ Page kinds: `1` collection definition, `2` vectors, `3` graph, `4` payloads, `5`
 - **Payload page**: record count, then per record: internal vector id, length-prefixed encoded key, length-prefixed serialized payload (UTF-8 JSON produced by a source-generated `JsonTypeInfo<T>`).
 - **Text page**: document count, then per document: id, token count, `(term, tf)` pairs, and the document length. BM25 is rebuilt from the typed payloads on materialisation so replay never needs a user-supplied serializer or tokenizer.
 
-HNSW adjacency pages are validated and stored for tooling, but the in-memory graph is rebuilt from the stored vectors and levels on open. Reciprocal links created by later inserts are not part of an earlier record's snapshot; rebuilding guarantees a connected graph and removes dangling tombstones.
+HNSW adjacency pages are the authoritative graph on open: the stored per-layer neighbours and backbone links are loaded directly, so reopening an index is linear in the number of edges instead of rebuilding the graph from vectors. A WAL upsert records the links chosen for one newly inserted node but not the reciprocal links added to older nodes; open completes those asymmetric edges (and drops links to absent or tombstoned nodes) in a linear pass. See `HnswIndex.Restore` / `RestoreReciprocalLinks`.
 
 ## Write-ahead log
 
@@ -88,21 +88,21 @@ Record types:
 | `3` | Collection id + internal id of a deleted node |
 | `4` | Collection id (delete collection) |
 
-Records are self-contained: an upsert carries the complete vector, payload and key, so replaying any prefix of well-formed records yields a consistent prefix of committed operations. A partial frame, a length that runs past the end of the file, or a CRC mismatch marks a torn tail. The scan stops there; every earlier record is replayed in order, and the file is truncated to the last valid frame before new writes are appended.
+Records are self-contained: an upsert carries the complete vector, payload and key, so replaying any prefix of well-formed records yields a consistent prefix of committed operations. A partial frame, a length that runs past the end of the file, or a CRC mismatch marks a torn tail. The scan stops there; every earlier record is replayed in order, and the file is truncated to the last valid frame before new writes are appended. A CRC-valid but structurally malformed payload also stops replay at that record — later records are never applied out of order. An invalid WAL header is damage to the log itself: strict mode raises `FaroCorruptionException` without touching the file; salvage mode copies it to `<path>.wal.corrupt` and reports it before starting a fresh log.
 
 ## Durability modes
 
 | Mode | Behaviour |
 | --- | --- |
 | `Always` | `fsync` after every WAL record; slowest, strongest guarantee |
-| `Batched` | `fsync` once per commit group (explicit `Flush`, dispose, checkpoint or batch) — default |
-| `None` | rely on OS flushing; fastest, loses recent commits on power loss |
+| `Batched` | `fsync` at every commit group (explicit `Flush`, dispose, checkpoint, end of `UpsertBatch`) plus a periodic interval of 256 records — default |
+| `None` | no `fsync`; records stay in the FileStream buffer and OS page cache, so recent commits are lost on a process crash (`FailFast`/`kill`) as well as power loss |
 
-`Flush()` and `FlushAsync()` force a durable flush in `Batched` mode; they are no-ops in `None` mode and redundant in `Always` mode.
+`Flush()` and `FlushAsync()` force a durable flush in `Batched` mode; they are no-ops in `None` mode and redundant in `Always` mode. `UpsertBatch` is a commit group: it flushes when it returns, so a process crash afterwards cannot lose records still buffered by the `FileStream`.
 
 ## Checkpointing
 
-`FaroDb.Checkpoint()` collects the current state of every materialised collection, writes all pages to `<path>.tmp`, flushes it to disk, then atomically replaces the main file (`File.Move(..., overwrite: true)`). The WAL is reset only after the rename is durable. The old memory map is released before the replace and a new one is created afterwards; mapped vector slices are rebound to it. Because spans can point into the old mapping, callers must not search concurrently with a checkpoint on the same database instance.
+`FaroDb.Checkpoint()` collects the current state of every materialised collection, writes all pages to `<path>.tmp`, flushes it to disk, then atomically replaces the main file (`File.Move(..., overwrite: true)`). The WAL is reset only after the rename is durable. The old memory map is released before the replace and a new one is created afterwards; mapped vector slices are rebound to it. Reads (`Search`, `HybridSearch`, `GetByFilter`, `TryGet`, ...) hold the database read gate for their duration, so they are safe to run concurrently with a checkpoint: the checkpoint's write gate waits for in-flight reads before releasing the mapping.
 
 ## In-memory mode
 

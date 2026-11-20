@@ -154,6 +154,13 @@ public sealed class HnswIndex
     /// <summary>Number of live (non-deleted) nodes.</summary>
     public int LiveCount => Volatile.Read(ref _liveCount);
 
+    /// <summary>
+    /// Whether the most recent <see cref="Restore"/> used the persisted adjacency pages as-is
+    /// instead of rebuilding the graph from vectors. Rebuilds are O(n·log n); a stored-graph load
+    /// is linear in the number of edges.
+    /// </summary>
+    internal bool RestoredFromStoredTopology { get; private set; }
+
     /// <summary>Number of dimensions of stored vectors.</summary>
     public int Dimensions => _dimensions;
 
@@ -562,6 +569,12 @@ public sealed class HnswIndex
             return; // first node in the graph (or sole node at a new top layer)
         }
 
+        ConnectNode(node, view, entryId, maxLevelBefore);
+    }
+
+    /// <summary>Searches from <paramref name="entryId"/> and links <paramref name="node"/> at every layer.</summary>
+    private void ConnectNode(HnswNode node, HnswGraphView view, int entryId, int maxLevelBefore)
+    {
         var scorer = new QueryScorer(this, node.Vector.Floats, (node.Bits is null ? default : node.Bits.Bits));
         int[] buffer = FaroPool<int>.Instance.Rent(Math.Max(_efConstruction, 1));
         try
@@ -1611,6 +1624,8 @@ public sealed class HnswIndex
     {
         lock (_deleteLock)
         {
+            HnswNode?[] restored;
+            int count;
             lock (_stateLock)
             {
                 int maxId = -1;
@@ -1625,11 +1640,11 @@ public sealed class HnswIndex
                     _trainingSample.Clear();
                 }
 
-                var restored = new HnswNode?[_nodes.Length];
+                restored = new HnswNode?[_nodes.Length];
                 int live = 0;
                 int maxLevel = -1;
                 int entry = -1;
-                int count = maxId + 1;
+                count = maxId + 1;
 
                 foreach (PersistedNode node in nodes)
                 {
@@ -1716,11 +1731,68 @@ public sealed class HnswIndex
                 Volatile.Write(ref _liveCount, live);
             }
 
-            // Stored adjacency pages are validated and kept for the file-format contract, but a
-            // WAL snapshot only records one node's links at insert time: reciprocal links added
-            // to older nodes are not part of that record. Rebuilding from the stored vectors and
-            // levels guarantees the restored graph is fully connected and free of tombstones.
-            Compact();
+            // The checkpoint graph page stores every node's complete adjacency. A WAL upsert only
+            // records the links chosen when that one node was inserted, so the reciprocal half of
+            // those edges is missing on older nodes. Restore that half instead of rebuilding the
+            // whole graph from vectors: O(edges) rather than O(n·log n), which used to take 82 s
+            // to reopen 20k x 128 versus 0.14 s to write the checkpoint.
+            RestoreReciprocalLinks(restored, count);
+            RestoredFromStoredTopology = true;
+        }
+    }
+
+    /// <summary>Completes asymmetric stored edges without discarding the persisted topology.</summary>
+    private static void RestoreReciprocalLinks(HnswNode?[] nodes, int count)
+    {
+        for (int id = 0; id < count; id++)
+        {
+            HnswNode? node = nodes[id];
+            if (node is null || node.Deleted)
+            {
+                continue;
+            }
+
+            int[][] links = node.Neighbors;
+            for (int layer = 0; layer < links.Length; layer++)
+            {
+                foreach (int otherId in links[layer])
+                {
+                    AddReciprocal(nodes, count, otherId, layer, id, backbone: false);
+                }
+            }
+
+            int[][] backbone = node.Backbone;
+            for (int layer = 0; layer < backbone.Length; layer++)
+            {
+                foreach (int otherId in backbone[layer])
+                {
+                    AddReciprocal(nodes, count, otherId, layer, id, backbone: true);
+                }
+            }
+        }
+    }
+
+    private static void AddReciprocal(
+        HnswNode?[] nodes, int count, int otherId, int layer, int sourceId, bool backbone)
+    {
+        if ((uint)otherId >= (uint)count)
+        {
+            return;
+        }
+
+        HnswNode? other = nodes[otherId];
+        if (other is null || other.Deleted || layer > other.Level)
+        {
+            return;
+        }
+
+        if (backbone)
+        {
+            other.AddBackbone(layer, sourceId);
+        }
+        else
+        {
+            other.AddLink(layer, sourceId);
         }
     }
 
@@ -1759,6 +1831,10 @@ public sealed class HnswIndex
         }
 
         node.SetVector(stored, bits);
+        // The graph was built for the old position. Detach and re-select this node's links for
+        // the new vector, otherwise searches cannot reach it once it moves away from its old
+        // neighbourhood (the persisted topology then quietly degrades recall).
+        RelinkNode(node, view);
         if (_quantization is not null)
         {
             lock (_quantLock)
@@ -1783,6 +1859,105 @@ public sealed class HnswIndex
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Detaches a node whose vector changed from its old neighbourhood and reconnects it using
+    /// the same layered search and Algorithm 4 selection as a fresh insert. Node id and level are
+    /// preserved, and the old spine neighbours are re-linked in a star so the layer stays connected.
+    /// </summary>
+    private void RelinkNode(HnswNode node, HnswGraphView view)
+    {
+        var detachedSpine = new List<int>[Math.Min(node.Level, view.MaxLevel) + 1];
+        for (int i = 0; i < detachedSpine.Length; i++)
+        {
+            detachedSpine[i] = [];
+        }
+
+        for (int layer = 0; layer <= node.Level; layer++)
+        {
+            if (layer < detachedSpine.Length)
+            {
+                foreach (int spineId in node.GetBackbone(layer))
+                {
+                    if ((uint)spineId < (uint)view.Count && view.Nodes[spineId] is { Deleted: false })
+                    {
+                        detachedSpine[layer].Add(spineId);
+                    }
+                }
+            }
+
+            for (int otherId = 0; otherId < view.Count; otherId++)
+            {
+                if (otherId == node.Id)
+                {
+                    continue;
+                }
+
+                HnswNode? other = view.Nodes[otherId];
+                if (other is null || layer > other.Level)
+                {
+                    continue;
+                }
+
+                other.RemoveLinks(layer, node.Id);
+                other.RemoveBackbone(layer, node.Id);
+            }
+
+            node.SetLinks(layer, []);
+            node.SetBackbone(layer, []);
+        }
+
+        int entryId = view.EntryPointId;
+        if (entryId < 0 || entryId == node.Id)
+        {
+            // The entry point itself moved: pick the highest live node instead. The descent in
+            // ConnectNode must start at a layer the entry actually has, otherwise GetLinks(layer)
+            // would index past its per-layer adjacency arrays.
+            entryId = -1;
+            int entryLevel = -1;
+            for (int id = 0; id < view.Count; id++)
+            {
+                if (id != node.Id && view.Nodes[id] is { Deleted: false } candidate &&
+                    candidate.Level > entryLevel)
+                {
+                    entryId = id;
+                    entryLevel = candidate.Level;
+                }
+            }
+        }
+
+        if (entryId < 0 || view.MaxLevel < 0)
+        {
+            return; // the node was the only one in the graph
+        }
+
+        int startLayer = Math.Min(view.MaxLevel, view.Nodes[entryId]!.Level);
+        ConnectNode(node, view, entryId, startLayer);
+
+        for (int layer = 0; layer < detachedSpine.Length; layer++)
+        {
+            List<int> spine = detachedSpine[layer];
+            if (spine.Count < 2)
+            {
+                continue;
+            }
+
+            HnswNode? hub = view.Nodes[spine[0]];
+            if (hub is null || hub.Deleted)
+            {
+                continue;
+            }
+
+            for (int i = 1; i < spine.Count; i++)
+            {
+                HnswNode? leaf = view.Nodes[spine[i]];
+                if (leaf is not null && !leaf.Deleted)
+                {
+                    AddBackboneEdge(hub, leaf, layer, view);
+                }
+            }
+        }
     }
 
     /// <summary>Rebinds all mapped vector slices after a checkpoint replaces the backing file.</summary>

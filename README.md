@@ -201,7 +201,7 @@ using var db = FaroDb.Open("knowledge.faro", new FaroOptions
     Durability = Durability.Batched, // Always | Batched (default) | None
 });
 
-var docs = db.GetOrCreateCollection("docs", new CollectionOptions<Doc>
+var docs = db.GetOrCreateCollection<string, Doc>("docs", new CollectionOptions<Doc>
 {
     Dimensions = 768,
     Distance = Distance.Cosine,
@@ -222,7 +222,7 @@ HybridHit<string>[] hybrid = docs.HybridSearch(queryEmbedding, "ação", k: 10);
 db.Checkpoint();                                      // temp file + atomic rename; resets the WAL
 ```
 
-Open replays the WAL and truncates a torn tail, so a crash leaves a consistent prefix of committed operations. Vector pages of the checkpoint are memory-mapped; vectors added after the last checkpoint are held in arrays. Checkpoints are byte-deterministic for the same operation log, and the full byte layout is documented in [docs/file-format.md](docs/file-format.md). Do not search a database instance while checkpointing it.
+Open replays the WAL and truncates a torn tail, so a crash leaves a consistent prefix of committed operations. A damaged checkpoint page is never silently treated as absent: open throws `FaroCorruptionException`, and `FaroDb.OpenWithRecovery(path, options, out var report)` opts in to salvaging valid data with a per-page report. Vector pages of the checkpoint are memory-mapped; vectors added after the last checkpoint are held in arrays, and the persisted graph is loaded directly on reopen. Checkpoints are byte-deterministic for the same operation log, and the full byte layout is documented in [docs/file-format.md](docs/file-format.md). Searches hold a read lock, so they are safe while another thread checkpoints the same instance.
 
 ## Distances
 

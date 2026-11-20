@@ -1,4 +1,5 @@
-using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
@@ -48,7 +49,7 @@ internal static class Int8Kernels
     /// <summary>Returns the naive scalar inner product of two int8 codes (reference implementation).</summary>
     public static int DotScalar(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int sum = 0;
         for (int i = 0; i < a.Length; i++)
@@ -62,7 +63,7 @@ internal static class Int8Kernels
     /// <summary>Inner product of two int8 codes computed with 128-bit vectors.</summary>
     public static int DotV128(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -97,7 +98,7 @@ internal static class Int8Kernels
     /// <summary>Inner product of two int8 codes computed with 256-bit vectors.</summary>
     public static int DotV256(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -132,7 +133,7 @@ internal static class Int8Kernels
     /// <summary>Inner product of two int8 codes computed with 512-bit vectors.</summary>
     public static int DotV512(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -167,7 +168,7 @@ internal static class Int8Kernels
     /// <summary>Returns the squared Euclidean distance between two int8 codes (reference implementation).</summary>
     public static int SquaredDistanceScalar(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int sum = 0;
         for (int i = 0; i < a.Length; i++)
@@ -203,7 +204,7 @@ internal static class Int8Kernels
     /// <summary>Squared Euclidean distance between two int8 codes computed with 128-bit vectors.</summary>
     public static int SquaredDistanceV128(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -239,7 +240,7 @@ internal static class Int8Kernels
     /// <summary>Squared Euclidean distance between two int8 codes computed with 256-bit vectors.</summary>
     public static int SquaredDistanceV256(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -275,7 +276,7 @@ internal static class Int8Kernels
     /// <summary>Squared Euclidean distance between two int8 codes computed with 512-bit vectors.</summary>
     public static int SquaredDistanceV512(ReadOnlySpan<sbyte> a, ReadOnlySpan<sbyte> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -307,6 +308,21 @@ internal static class Int8Kernels
 
         return sum;
     }
+
+    // LoadUnsafe reads a whole SIMD register from a raw pointer; a short operand is an out-of-bounds
+    // read once Debug.Assert is stripped, so all kernels validate their lengths in Release too.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void RequireSameLength(int left, int right)
+    {
+        if (left != right)
+        {
+            ThrowLengthMismatch(left, right);
+        }
+    }
+
+    [DoesNotReturn]
+    private static void ThrowLengthMismatch(int left, int right) =>
+        throw new ArgumentException($"int8 codes must have the same length, got {left} and {right}.");
 
     private static Vector128<int> Multiply128(Vector128<sbyte> a, Vector128<sbyte> b)
     {

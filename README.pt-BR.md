@@ -168,7 +168,7 @@ using var db = FaroDb.Open("knowledge.faro", new FaroOptions
     Durability = Durability.Batched, // Always | Batched (padrão) | None
 });
 
-var docs = db.GetOrCreateCollection("docs", new CollectionOptions<Doc>
+var docs = db.GetOrCreateCollection<string, Doc>("docs", new CollectionOptions<Doc>
 {
     Dimensions = 768,
     Distance = Distance.Cosine,

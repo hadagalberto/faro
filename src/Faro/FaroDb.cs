@@ -31,6 +31,7 @@ public sealed class FaroDb : IDisposable, IAsyncDisposable
     private Dictionary<int, Dictionary<int, long>> _vectorOffsets = [];
     private MappedVectorRegion? _mapped;
     private WalFile? _wal;
+    private readonly CorruptionReport _recoveryReport = new();
     private bool _disposed;
 
     private FaroDb(string? path, FaroOptions options, bool inMemory)
@@ -44,7 +45,7 @@ public sealed class FaroDb : IDisposable, IAsyncDisposable
             return;
         }
 
-        CheckpointData checkpoint = Faro.Persistence.Checkpoint.Read(path!);
+        CheckpointData checkpoint = Faro.Persistence.Checkpoint.Read(path!, options.Recovery, _recoveryReport);
         foreach ((int id, CollectionDefinition definition) in checkpoint.Definitions)
         {
             _state.Add(definition);
@@ -56,13 +57,15 @@ public sealed class FaroDb : IDisposable, IAsyncDisposable
             }
         }
 
-        _wal = new WalFile(path! + WalFile.Suffix, options.Durability, options.TruncateTornTail);
+        _wal = new WalFile(
+            path! + WalFile.Suffix, options.Durability, options.TruncateTornTail,
+            options.Recovery, _recoveryReport);
         Replay(_wal.Replay);
 
         if (File.Exists(path!) && new FileInfo(path!).Length > 0)
         {
             _mapped = new MappedVectorRegion(path!);
-            _vectorOffsets = Faro.Persistence.Checkpoint.ReadVectorOffsets(path!);
+            _vectorOffsets = Faro.Persistence.Checkpoint.ReadVectorOffsets(path!, options.Recovery, _recoveryReport);
             foreach ((int collectionId, int nodeId) in _walUpdatedNodes)
             {
                 if (_vectorOffsets.TryGetValue(collectionId, out Dictionary<int, long>? offsets))
@@ -81,6 +84,12 @@ public sealed class FaroDb : IDisposable, IAsyncDisposable
 
     /// <summary>The options this database was opened with.</summary>
     public FaroOptions Options { get; }
+
+    /// <summary>
+    /// Damage found while opening. Only populated for <see cref="CheckpointRecovery.Salvage"/>;
+    /// in the default <see cref="CheckpointRecovery.Fail"/> mode any damage throws instead.
+    /// </summary>
+    public CorruptionReport RecoveryReport => _recoveryReport;
 
     /// <summary>Names of all collections known to the database, including ones not yet materialised.</summary>
     public IReadOnlyCollection<string> CollectionNames
@@ -107,6 +116,24 @@ public sealed class FaroDb : IDisposable, IAsyncDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         return new FaroDb(System.IO.Path.GetFullPath(path), options ?? new FaroOptions(), inMemory: false);
+    }
+
+    /// <summary>
+    /// Opens a damaged database in salvage mode and reports everything that could not be recovered.
+    /// Undamaged collections and records are loaded; damaged pages are skipped and listed on
+    /// <paramref name="report"/>. The main checkpoint and WAL files are never silently wiped.
+    /// </summary>
+    public static FaroDb OpenWithRecovery(string path, FaroOptions? options, out CorruptionReport report)
+    {
+        var recoveryOptions = new FaroOptions
+        {
+            Durability = options?.Durability ?? Durability.Batched,
+            TruncateTornTail = options?.TruncateTornTail ?? true,
+            Recovery = CheckpointRecovery.Salvage,
+        };
+        FaroDb db = Open(path, recoveryOptions);
+        report = db.RecoveryReport;
+        return db;
     }
 
     /// <summary>Creates a database that keeps all state in memory, with no file and no WAL.</summary>
@@ -331,7 +358,8 @@ public sealed class FaroDb : IDisposable, IAsyncDisposable
                 _wal.ResetAfterCheckpoint();
 
                 _mapped = new MappedVectorRegion(Path!);
-                _vectorOffsets = Faro.Persistence.Checkpoint.ReadVectorOffsets(Path!);
+                _vectorOffsets = Faro.Persistence.Checkpoint.ReadVectorOffsets(
+                    Path!, Options.Recovery, _recoveryReport);
                 foreach (IPersistedCollection collection in collections)
                 {
                     collection.Rebind(_mapped);
@@ -468,9 +496,13 @@ public sealed class FaroDb : IDisposable, IAsyncDisposable
                         break;
                 }
             }
-            catch (InvalidDataException)
+            catch (InvalidDataException error)
             {
-                // A structurally invalid record behaves like a torn tail record.
+                // A CRC-valid but structurally invalid payload is corruption, not a skipped
+                // record: applying later records would apply operations out of their prefix.
+                _recoveryReport.Add(0, -1, 0, record.Payload.Length,
+                    $"malformed WAL record type {record.Type}: {error.Message}");
+                break;
             }
         }
     }

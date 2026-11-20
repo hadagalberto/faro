@@ -4,6 +4,14 @@ All notable changes to Faro are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+
+- Checkpoint pages with a failed CRC32C, an out-of-range position or a malformed body now raise `FaroCorruptionException` instead of being treated as absent; `FaroDb.OpenWithRecovery` / `FaroOptions.Recovery` opt into salvaging valid data with a per-region `RecoveryReport`. Checkpoint reads use 64-bit offsets, so files over 2 GB open.
+- Same-key upserts are serialized by striped per-key gates, so concurrent batches no longer leave orphaned live nodes; `UpsertBatch` fsyncs at the batch boundary and Batched WAL appends flush every 256 records.
+- Searches and other reads hold the database read gate, making concurrent search + checkpoint safe. Malformed WAL records stop replay at the last valid prefix, and a corrupt WAL header no longer wipes the log silently.
+- `Restore` loads the persisted graph directly (completing asymmetric WAL links) instead of rebuilding it, and `Replace` relinks moved nodes. SIMD kernels validate lengths at runtime in Release.
+- README samples use the string-keyed collection overload and are compiled by a Roslyn regression test. See `docs/REVIEW-FIXES.md`.
+
 ## [0.7.0] — Milestone 7
 
 ### Added

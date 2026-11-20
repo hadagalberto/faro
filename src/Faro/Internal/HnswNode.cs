@@ -128,6 +128,14 @@ internal sealed class HnswNode
         }
     }
 
+    internal void SetBackbone(int layer, int[] ids)
+    {
+        lock (Gate)
+        {
+            Replace(ref _backbone, layer, ids);
+        }
+    }
+
     internal void AddLink(int layer, int id)
     {
         lock (Gate)

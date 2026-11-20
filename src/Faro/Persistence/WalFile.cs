@@ -8,16 +8,18 @@ internal readonly record struct WalRecord(byte Type, ReadOnlyMemory<byte> Payloa
 /// <summary>Result of scanning a write-ahead log, including any torn tail.</summary>
 internal sealed class WalReplay
 {
-    internal WalReplay(List<WalRecord> records, long validLength, bool hadTornTail)
+    internal WalReplay(List<WalRecord> records, long validLength, bool hadTornTail, bool headerInvalid = false)
     {
         Records = records;
         ValidLength = validLength;
         HadTornTail = hadTornTail;
+        HeaderInvalid = headerInvalid;
     }
 
     internal List<WalRecord> Records { get; }
     internal long ValidLength { get; }
     internal bool HadTornTail { get; }
+    internal bool HeaderInvalid { get; }
 }
 
 /// <summary>
@@ -30,6 +32,10 @@ internal sealed class WalFile : IDisposable
     internal const string Suffix = ".wal";
     private const int HeaderSize = 16;
     private const int MaxRecordBytes = 256 * 1024 * 1024;
+
+    /// <summary>Upper bound on records left in the 64 KB FileStream buffer in Batched mode.</summary>
+    private const int FlushIntervalAppends = 256;
+
     private static readonly byte[] Magic = "FAROWAL1"u8.ToArray();
 
     private readonly string _path;
@@ -38,20 +44,28 @@ internal sealed class WalFile : IDisposable
     private FileStream? _stream;
     private bool _dirty;
     private bool _disposed;
+    private int _appendsSinceFlush;
 
-    internal WalFile(string path, Durability durability, bool truncateTornTail)
+    internal WalFile(
+        string path, Durability durability, bool truncateTornTail,
+        CheckpointRecovery recovery, CorruptionReport report)
     {
         _path = path;
         _durability = durability;
-        Replay = Scan(path, truncateTornTail);
+        Replay = Scan(path, truncateTornTail, recovery, report);
         _stream = new FileStream(
             path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read,
             bufferSize: 64 * 1024, FileOptions.SequentialScan);
         _stream.Seek(0, SeekOrigin.End);
 
-        if (_stream.Length < HeaderSize)
+        if (Replay.HeaderInvalid || _stream.Length < HeaderSize)
         {
+            // Salvage left the damaged bytes in place when truncation was disabled; either way the
+            // live log must start with a valid header or the next open (and all appends) are broken.
+            _stream.SetLength(0);
+            _stream.Seek(0, SeekOrigin.Begin);
             WriteHeader();
+            _stream.Flush(flushToDisk: true);
         }
     }
 
@@ -88,6 +102,15 @@ internal sealed class WalFile : IDisposable
                 _stream.Flush(flushToDisk: true);
                 _dirty = false;
             }
+            else if (_durability == Durability.Batched &&
+                     ++_appendsSinceFlush >= FlushIntervalAppends)
+            {
+                // Batched records sit in the FileStream buffer; bound how many a process crash can
+                // lose even when the caller never reaches a batch boundary or explicit Flush().
+                _stream.Flush(flushToDisk: true);
+                _appendsSinceFlush = 0;
+                _dirty = false;
+            }
         }
     }
 
@@ -107,6 +130,7 @@ internal sealed class WalFile : IDisposable
             }
 
             _dirty = false;
+            _appendsSinceFlush = 0;
         }
     }
 
@@ -120,6 +144,7 @@ internal sealed class WalFile : IDisposable
             WriteHeader();
             _stream.Flush(flushToDisk: true);
             _dirty = false;
+            _appendsSinceFlush = 0;
         }
     }
 
@@ -154,7 +179,8 @@ internal sealed class WalFile : IDisposable
     }
 
     /// <summary>Scans a WAL file and returns the longest prefix of well-formed records.</summary>
-    internal static WalReplay Scan(string path, bool truncateTornTail)
+    internal static WalReplay Scan(
+        string path, bool truncateTornTail, CheckpointRecovery recovery, CorruptionReport report)
     {
         if (!File.Exists(path) || new FileInfo(path).Length == 0)
         {
@@ -162,17 +188,42 @@ internal sealed class WalFile : IDisposable
         }
 
         byte[] bytes = File.ReadAllBytes(path);
-        if (bytes.Length < HeaderSize ||
-            !bytes.AsSpan(0, Magic.Length).SequenceEqual(Magic) ||
-            BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8, 4)) != 1 ||
-            BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(12, 4)) != Crc32C.Compute(bytes.AsSpan(0, 12)))
+        if (bytes.Length < HeaderSize)
         {
+            // A file shorter than its 16-byte header cannot contain a single committed frame. This
+            // is a torn header (a crash before the first append), not corruption of existing data.
             if (truncateTornTail)
             {
                 File.WriteAllBytes(path, []);
             }
 
-            return new WalReplay([], 0, true);
+            return new WalReplay([], 0, true, headerInvalid: false);
+        }
+
+        if (!bytes.AsSpan(0, Magic.Length).SequenceEqual(Magic) ||
+            BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8, 4)) != 1 ||
+            BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(12, 4)) != Crc32C.Compute(bytes.AsSpan(0, 12)))
+        {
+            // A bad header is not a torn record: it is damage to the log itself. Never wipe it
+            // silently. Strict mode refuses to open; salvage preserves a copy and reports it.
+            report.Add(0, -1, 0, bytes.Length,
+                $"WAL header is invalid or unsupported (file '{path}')");
+            if (recovery == CheckpointRecovery.Fail)
+            {
+                throw new FaroCorruptionException(
+                    $"WAL header is invalid or unsupported (file '{path}'); " +
+                    "open with CheckpointRecovery.Salvage to preserve a copy and skip it");
+            }
+
+            // Preserve the damaged log for inspection whatever the truncation setting says; only
+            // replace it when the caller allows torn-tail truncation.
+            File.Copy(path, path + ".corrupt", overwrite: true);
+            if (truncateTornTail)
+            {
+                File.WriteAllBytes(path, []);
+            }
+
+            return new WalReplay([], 0, true, headerInvalid: true);
         }
 
         var records = new List<WalRecord>();

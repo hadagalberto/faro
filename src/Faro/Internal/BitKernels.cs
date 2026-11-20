@@ -1,5 +1,6 @@
-using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
@@ -20,6 +21,21 @@ namespace Faro.Internal;
 /// </remarks>
 internal static class BitKernels
 {
+    // LoadUnsafe reads a whole SIMD register from a raw pointer; a short operand is an out-of-bounds
+    // read once Debug.Assert is stripped, so packed-bit kernels validate lengths in Release too.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void RequireSameLength(int left, int right)
+    {
+        if (left != right)
+        {
+            ThrowLengthMismatch(left, right);
+        }
+    }
+
+    [DoesNotReturn]
+    private static void ThrowLengthMismatch(int left, int right) =>
+        throw new ArgumentException($"packed bit vectors must have the same length, got {left} and {right}.");
+
     private const ulong Step1Mask = 0x5555_5555_5555_5555UL; // 01 repeated: pairs of bits
     private const ulong Step2Mask = 0x3333_3333_3333_3333UL; // 0011 repeated: nibble halves
     private const ulong Step4Mask = 0x0F0F_0F0F_0F0F_0F0FUL; // 00001111 repeated: nibbles
@@ -49,7 +65,7 @@ internal static class BitKernels
     /// <summary>Naive scalar Hamming distance (hardware POPCNT per word).</summary>
     public static int HammingScalar(ReadOnlySpan<ulong> a, ReadOnlySpan<ulong> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         long total = 0;
         for (int i = 0; i < a.Length; i++)
@@ -63,7 +79,7 @@ internal static class BitKernels
     /// <summary>Hamming distance computed with 128-bit vectors.</summary>
     public static int HammingV128(ReadOnlySpan<ulong> a, ReadOnlySpan<ulong> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -106,7 +122,7 @@ internal static class BitKernels
     /// <summary>Hamming distance computed with 256-bit vectors.</summary>
     public static int HammingV256(ReadOnlySpan<ulong> a, ReadOnlySpan<ulong> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;
@@ -147,7 +163,7 @@ internal static class BitKernels
     /// <summary>Hamming distance computed with 512-bit vectors.</summary>
     public static int HammingV512(ReadOnlySpan<ulong> a, ReadOnlySpan<ulong> b)
     {
-        Debug.Assert(a.Length == b.Length);
+        RequireSameLength(a.Length, b.Length);
 
         int n = a.Length;
         int i = 0;

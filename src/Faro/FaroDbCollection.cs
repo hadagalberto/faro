@@ -49,6 +49,13 @@ public class FaroDbCollection<TKey, TPayload> : IPersistedCollection
     private readonly ConcurrentDictionary<TKey, int> _keyToId;
     private readonly ConcurrentDictionary<int, TKey> _idToKey;
 
+    /// <summary>
+    /// Striped per-key gates. Upsert's TryGetValue/Add/Replace sequence must be atomic per key or
+    /// concurrent writers create orphaned live nodes; fixed stripes keep that synchronization
+    /// bounded in memory regardless of how many keys the collection holds.
+    /// </summary>
+    private readonly object[] _keyLocks = Enumerable.Range(0, 256).Select(_ => new object()).ToArray();
+
     internal FaroDbCollection(
         FaroDb db,
         CollectionState state,
@@ -85,8 +92,24 @@ public class FaroDbCollection<TKey, TPayload> : IPersistedCollection
         }
     }
 
+    private object KeyGate(TKey key) => _keyLocks[(uint)key.GetHashCode() % (uint)_keyLocks.Length];
+
     /// <summary>Number of live records in the collection.</summary>
-    public int Count => _collection.Count;
+    public int Count
+    {
+        get
+        {
+            _db.Gate.EnterReadLock();
+            try
+            {
+                return _collection.Count;
+            }
+            finally
+            {
+                _db.Gate.ExitReadLock();
+            }
+        }
+    }
 
     /// <summary>Name of the collection.</summary>
     public string Name => _state.Definition.Name;
@@ -98,7 +121,21 @@ public class FaroDbCollection<TKey, TPayload> : IPersistedCollection
     public Bm25Index TextIndex => _collection.TextIndex;
 
     /// <summary>All live keys, in unspecified order.</summary>
-    public IReadOnlyCollection<TKey> Keys => _keyToId.Keys.ToArray();
+    public IReadOnlyCollection<TKey> Keys
+    {
+        get
+        {
+            _db.Gate.EnterReadLock();
+            try
+            {
+                return _keyToId.Keys.ToArray();
+            }
+            finally
+            {
+                _db.Gate.ExitReadLock();
+            }
+        }
+    }
 
     /// <summary>The planner decision made by the most recent search.</summary>
     public SearchDecision LastDecision => _collection.LastDecision;
@@ -134,6 +171,10 @@ public class FaroDbCollection<TKey, TPayload> : IPersistedCollection
         }
 
         Parallel.ForEach(distinct.Values, item => UpsertCore(item.Key, item.Vector, item.Payload));
+
+        // A batch is one commit group in Batched mode: fsync the WAL here so a process crash after
+        // the call cannot lose records that are still sitting in the FileStream buffer.
+        _db.Flush();
     }
 
     /// <summary>Asynchronously inserts or replaces one record.</summary>
@@ -159,23 +200,26 @@ public class FaroDbCollection<TKey, TPayload> : IPersistedCollection
     public bool Delete(TKey key)
     {
         ValidateKey(key);
-        _db.Gate.EnterReadLock();
-        try
+        lock (KeyGate(key))
         {
-            if (!_keyToId.TryRemove(key, out int id))
+            _db.Gate.EnterReadLock();
+            try
             {
-                return false;
-            }
+                if (!_keyToId.TryRemove(key, out int id))
+                {
+                    return false;
+                }
 
-            _idToKey.TryRemove(id, out _);
-            _collection.Delete(id);
-            _state.ApplyDelete(id);
-            _db.AppendDelete(_collectionId, id);
-            return true;
-        }
-        finally
-        {
-            _db.Gate.ExitReadLock();
+                _idToKey.TryRemove(id, out _);
+                _collection.Delete(id);
+                _state.ApplyDelete(id);
+                _db.AppendDelete(_collectionId, id);
+                return true;
+            }
+            finally
+            {
+                _db.Gate.ExitReadLock();
+            }
         }
     }
 
@@ -192,13 +236,21 @@ public class FaroDbCollection<TKey, TPayload> : IPersistedCollection
     public bool TryGet(TKey key, out TPayload? payload)
     {
         ValidateKey(key);
-        if (!_keyToId.TryGetValue(key, out int id))
+        _db.Gate.EnterReadLock();
+        try
         {
-            payload = null;
-            return false;
-        }
+            if (!_keyToId.TryGetValue(key, out int id))
+            {
+                payload = null;
+                return false;
+            }
 
-        return _collection.TryGetPayload(id, out payload);
+            return _collection.TryGetPayload(id, out payload);
+        }
+        finally
+        {
+            _db.Gate.ExitReadLock();
+        }
     }
 
     /// <summary>Whether the collection contains <paramref name="key"/>.</summary>
@@ -206,7 +258,15 @@ public class FaroDbCollection<TKey, TPayload> : IPersistedCollection
     public bool ContainsKey(TKey key)
     {
         ValidateKey(key);
-        return _keyToId.ContainsKey(key);
+        _db.Gate.EnterReadLock();
+        try
+        {
+            return _keyToId.ContainsKey(key);
+        }
+        finally
+        {
+            _db.Gate.ExitReadLock();
+        }
     }
 
     /// <summary>
@@ -221,24 +281,32 @@ public class FaroDbCollection<TKey, TPayload> : IPersistedCollection
         ArgumentNullException.ThrowIfNull(filter);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(top);
 
-        _collection.ValidateFilterFields(filter);
-        int[] ids = _collection.EvaluateFilter(filter).ToArray();
-        Array.Sort(ids);
-        var results = new List<(TKey, TPayload)>(Math.Min(ids.Length, top));
-        foreach (int id in ids)
+        _db.Gate.EnterReadLock();
+        try
         {
-            if (results.Count >= top)
+            _collection.ValidateFilterFields(filter);
+            int[] ids = _collection.EvaluateFilter(filter).ToArray();
+            Array.Sort(ids);
+            var results = new List<(TKey, TPayload)>(Math.Min(ids.Length, top));
+            foreach (int id in ids)
             {
-                break;
+                if (results.Count >= top)
+                {
+                    break;
+                }
+
+                if (_idToKey.TryGetValue(id, out TKey? key) && _collection.TryGetPayload(id, out TPayload? payload) && payload is not null)
+                {
+                    results.Add((key, payload));
+                }
             }
 
-            if (_idToKey.TryGetValue(id, out TKey? key) && _collection.TryGetPayload(id, out TPayload? payload) && payload is not null)
-            {
-                results.Add((key, payload));
-            }
+            return results;
         }
-
-        return results;
+        finally
+        {
+            _db.Gate.ExitReadLock();
+        }
     }
 
     /// <summary>Searches by vector, optionally restricted by a payload filter.</summary>
@@ -250,17 +318,27 @@ public class FaroDbCollection<TKey, TPayload> : IPersistedCollection
     public SearchHit<TKey>[] Search(
         ReadOnlySpan<float> query, int k, Filter? filter = null, int? efSearch = null)
     {
-        SearchResult[] hits = _collection.Search(query, k, filter, efSearch);
-        var result = new List<SearchHit<TKey>>(hits.Length);
-        foreach (SearchResult hit in hits)
+        // A checkpoint disposes and remaps the vector pages under the write gate. Holding the read
+        // gate keeps every mapped span read below valid for the whole search.
+        _db.Gate.EnterReadLock();
+        try
         {
-            if (_idToKey.TryGetValue(hit.Id, out TKey? key))
+            SearchResult[] hits = _collection.Search(query, k, filter, efSearch);
+            var result = new List<SearchHit<TKey>>(hits.Length);
+            foreach (SearchResult hit in hits)
             {
-                result.Add(new SearchHit<TKey> { Key = key, Score = hit.Score });
+                if (_idToKey.TryGetValue(hit.Id, out TKey? key))
+                {
+                    result.Add(new SearchHit<TKey> { Key = key, Score = hit.Score });
+                }
             }
-        }
 
-        return result.ToArray();
+            return result.ToArray();
+        }
+        finally
+        {
+            _db.Gate.ExitReadLock();
+        }
     }
 
     /// <summary>Asynchronously searches by vector.</summary>
@@ -293,25 +371,33 @@ public class FaroDbCollection<TKey, TPayload> : IPersistedCollection
         Filter? filter = null,
         int? efSearch = null)
     {
-        HybridResult[] hits = _collection.HybridSearch(query, text, k, fusion, filter, efSearch);
-        var result = new List<HybridHit<TKey>>(hits.Length);
-        foreach (HybridResult hit in hits)
+        _db.Gate.EnterReadLock();
+        try
         {
-            if (_idToKey.TryGetValue(hit.Id, out TKey? key))
+            HybridResult[] hits = _collection.HybridSearch(query, text, k, fusion, filter, efSearch);
+            var result = new List<HybridHit<TKey>>(hits.Length);
+            foreach (HybridResult hit in hits)
             {
-                result.Add(new HybridHit<TKey>
+                if (_idToKey.TryGetValue(hit.Id, out TKey? key))
                 {
-                    Key = key,
-                    Score = hit.Score,
-                    VectorScore = hit.VectorScore,
-                    TextScore = hit.TextScore,
-                    VectorRank = hit.VectorRank,
-                    TextRank = hit.TextRank,
-                });
+                    result.Add(new HybridHit<TKey>
+                    {
+                        Key = key,
+                        Score = hit.Score,
+                        VectorScore = hit.VectorScore,
+                        TextScore = hit.TextScore,
+                        VectorRank = hit.VectorRank,
+                        TextRank = hit.TextRank,
+                    });
+                }
             }
-        }
 
-        return result.ToArray();
+            return result.ToArray();
+        }
+        finally
+        {
+            _db.Gate.ExitReadLock();
+        }
     }
 
     /// <summary>Asynchronously runs a hybrid search.</summary>
@@ -333,7 +419,18 @@ public class FaroDbCollection<TKey, TPayload> : IPersistedCollection
         Task.Run(() => HybridSearch(query, text, k, fusion, filter, efSearch), cancellationToken);
 
     /// <summary>Rebuilds the graph without tombstoned nodes.</summary>
-    public void Compact() => _collection.Compact();
+    public void Compact()
+    {
+        _db.Gate.EnterReadLock();
+        try
+        {
+            _collection.Compact();
+        }
+        finally
+        {
+            _db.Gate.ExitReadLock();
+        }
+    }
 
     Bm25Snapshot IPersistedCollection.GetTextSnapshot() => _collection.TextIndex.Export();
 
@@ -343,32 +440,35 @@ public class FaroDbCollection<TKey, TPayload> : IPersistedCollection
     private void UpsertCore(TKey key, ReadOnlySpan<float> vector, TPayload payload)
     {
         ValidateArguments(key, vector, payload);
-        _db.Gate.EnterReadLock();
-        try
+        lock (KeyGate(key))
         {
-            byte[] serialized = _serializer.Serialize(payload);
-            int id;
-            if (_keyToId.TryGetValue(key, out id) &&
-                _collection.Index.IsAlive(id) &&
-                _collection.Index.Replace(id, vector))
+            _db.Gate.EnterReadLock();
+            try
             {
-                _collection.ReplacePayload(id, payload, serialized);
-            }
-            else
-            {
-                id = _collection.AddCore(vector, payload, serialized);
-                _keyToId[key] = id;
-                _idToKey[id] = key;
-            }
+                byte[] serialized = _serializer.Serialize(payload);
+                int id;
+                if (_keyToId.TryGetValue(key, out id) &&
+                    _collection.Index.IsAlive(id) &&
+                    _collection.Index.Replace(id, vector))
+                {
+                    _collection.ReplacePayload(id, payload, serialized);
+                }
+                else
+                {
+                    id = _collection.AddCore(vector, payload, serialized);
+                    _keyToId[key] = id;
+                    _idToKey[id] = key;
+                }
 
-            PersistedNode node = _collection.Index.ExportNode(id);
-            var record = new PersistedRecord(id, EncodeKey(key), serialized);
-            _state.ApplyUpsert(node, record);
-            _db.AppendUpsert(_collectionId, node, record);
-        }
-        finally
-        {
-            _db.Gate.ExitReadLock();
+                PersistedNode node = _collection.Index.ExportNode(id);
+                var record = new PersistedRecord(id, EncodeKey(key), serialized);
+                _state.ApplyUpsert(node, record);
+                _db.AppendUpsert(_collectionId, node, record);
+            }
+            finally
+            {
+                _db.Gate.ExitReadLock();
+            }
         }
     }
 

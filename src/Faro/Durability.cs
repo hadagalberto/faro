@@ -9,6 +9,11 @@ public enum Durability
     /// <summary>Fsync once per commit group (batch, explicit flush, checkpoint or dispose). Default.</summary>
     Batched = 1,
 
-    /// <summary>Rely on the OS page cache; recent commits may be lost on power failure.</summary>
+    /// <summary>
+    /// No fsync at all. Records remain in the FileStream buffer and the OS page cache, so a
+    /// process crash (<c>Environment.FailFast</c>, <c>kill</c>) or power failure can lose recent
+    /// commits — including records from a completed batch that sat below the internal flush
+    /// threshold. Use only for data that can be rebuilt from another source.
+    /// </summary>
     None = 2,
 }
